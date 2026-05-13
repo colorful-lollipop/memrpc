@@ -2251,6 +2251,9 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
 
         auto deadline = std::chrono::steady_clock::now() + computeWaitBudget(GetRecoveryRuntimeSnapshot());
         StatusCode status = invoke();
+        if (status == StatusCode::Ok) {
+            return status;
+        }
         while (true) {
             const auto snapshot = GetRecoveryRuntimeSnapshot();
             deadline = std::max(deadline, std::chrono::steady_clock::now() + computeWaitBudget(snapshot));

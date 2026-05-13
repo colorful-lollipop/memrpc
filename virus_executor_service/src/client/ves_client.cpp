@@ -342,6 +342,9 @@ MemRpc::StatusCode VesClient::InvokeApi(MemRpc::Opcode opcode,
         HILOGE("VesClient::InvokeApi failed: reply is null opcode=%{public}u", opcode);
         return MemRpc::StatusCode::InvalidArgument;
     }
+    if (client_.GetRecoveryRuntimeSnapshot().lifecycleState == MemRpc::ClientLifecycleState::Closed) {
+        return MemRpc::StatusCode::ClientClosed;
+    }
 
     std::vector<uint8_t> payload;
     MemRpc::StatusCode status = EncodeInvokePayload(opcode, request, &payload);
@@ -363,7 +366,7 @@ MemRpc::StatusCode VesClient::InvokeApi(MemRpc::Opcode opcode,
         execTimeoutMs,
         &payload,
     };
-    return client_.RetryUntilRecoverySettles([&]() {
+    status = client_.RetryUntilRecoverySettles([&]() {
         const auto control = CurrentControl();
         const VesInvokeExecutionContext context{
             &client_,
@@ -376,6 +379,11 @@ MemRpc::StatusCode VesClient::InvokeApi(MemRpc::Opcode opcode,
         }
         return invokeStatus;
     });
+    if (status == MemRpc::StatusCode::ClientClosed && bootstrapChannel_ != nullptr &&
+        bootstrapChannel_->HasFatalControlLoadFailure()) {
+        Shutdown();
+    }
+    return status;
 }
 
 MemRpc::StatusCode VesClient::ScanFile(const ScanTask& scanTask,

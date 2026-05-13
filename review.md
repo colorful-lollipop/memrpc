@@ -1,0 +1,48 @@
+人人写出CleanCode
+
+## 代码质量评分报告
+
+### 总体评分   
+- **总分**: 81/100
+- **评级**: B
+
+### 评估范围
+- `memrpc/include/`、`memrpc/src/`（排除 `tests/`）
+- `virus_executor_service/include/`、`virus_executor_service/src/`（排除 `tests/`、`testkit/`）
+- `include/virus_protection_executor_log.h`
+
+### 各维度评分
+
+| 维度 | 得分 | 权重 | 加权分 | 做的好的部分 | 可以提升的部分 |
+|------|------|------|--------|------|------|
+| 可读性 | 82 | 0.15 | 12.3 | 1. `memrpc/include/memrpc/client/rpc_client.h:19` — `execTimeoutMs` 语义注释清晰，明确说明了超时计时起点与行为。 2. `memrpc/include/memrpc/core/protocol.h:11` — 协议魔数、版本号等常量有中文注释说明“双方必须严格一致”。 3. `memrpc/include/memrpc/core/session.h:43` — `Attach` 函数注释明确说明了 fd 所有权转移规则。 4. `virus_executor_service/include/ves/ves_types.h:1` — 类型定义极简，职责单一，一目了然。 5. `virus_executor_service/include/service/virus_executor_service.h:16` — 类接口分组清晰，命名规范。 | 1. `memrpc/src/client/rpc_client.cpp:161` — `RpcClient::Impl` 长达约 2100 行，内部嵌套 5 个完整类，浏览成本高，建议提取为独立内部组件（预计扣 8 分）。 2. `virus_executor_service/src/transport/ves_control_proxy.cpp:234` — `VesBootstrapChannelState` 内部类长达 296 行，方法嵌套深，建议拆分为私有方法（预计扣 3 分）。 3. `virus_executor_service/src/client/ves_client.cpp:57` — `BuildRecoveryPolicy` 嵌套三层 lambda，捕获冗长，建议提取为静态工厂（预计扣 2 分）。 |
+| 可维护性 | 78 | 0.15 | 11.7 | 1. `memrpc/include/memrpc/core/bootstrap.h:54` — `IBootstrapChannel` 纯虚接口职责单一，成功解耦传输层与 RPC 逻辑。 2. `memrpc/include/memrpc/core/task_executor.h:9` — `TaskExecutor` 接口简洁，允许注入自定义线程池。 3. `virus_executor_service/include/service/rpc_handler_registrar.h:36` — `RegisterTypedHandler` 模板将编解码与业务 handler 解耦，新增接口只需注册一行。 4. `virus_executor_service/src/transport/registry_backend.cpp:1` — 对 `RegistryClient` 的薄封装，每个方法只做一件事。 | 1. `memrpc/src/client/rpc_client.cpp:161` — `RpcClient::Impl` 融合会话管理、恢复状态机、请求存储、工作线程等职责，建议拆分为组合式组件（预计扣 6 分）。 2. `virus_executor_service/src/transport/ves_control_proxy.cpp:62` 与 `ves_control_stub.h:15` — `SessionMetadata`、`AnyCallRequestHeader` 等结构体重复定义，建议提取到公共头文件（预计扣 4 分）。 3. `virus_executor_service/src/service/ves_session_service.cpp:266` — Chaos 测试逻辑直接侵入生产关闭路径，建议通过 Hook 在外部注入（预计扣 3 分）。 |
+| 安全性 | 83 | 0.15 | 12.45 | 1. `memrpc/src/core/byte_reader.cpp:21` — 所有读取操作均进行严格的空指针与边界检查，防止越界读取。 2. `memrpc/src/core/session.cpp:199` — `MapAndValidateHeader` 验证 magic 和 protocolVersion，防止连接到不兼容共享内存。 3. `memrpc/src/core/session.cpp:91` — `ValidateLayoutConfig` 对 ring size、payload size 进行上限检查。 4. `virus_executor_service/include/ves/ves_codec.h:22` — 所有 Decode 特化均显式检查 nullptr、越界及 engineCount 上限。 5. `virus_executor_service/src/transport/registry_protocol.cpp:87` — `RecvMessage` 限制单次消息长度不超过 64KB，防止恶意长度导致内存耗尽。 | 1. `virus_executor_service/src/transport/registry_server.cpp:62` / `registry_client.cpp:31` / `ves_control_proxy.cpp:53` — 三处使用 `std::strncpy` 写入 `sockaddr_un.sun_path`，未显式保证末尾 `\0`，建议显式设置终止符（预计扣 3 分）。 2. `virus_executor_service/src/service/ves_engine_service.cpp:93` — `shouldCrash` 为 true 时调用 `std::abort()`，测试后门存在于生产代码，建议抽离到 test-only 插件（预计扣 2 分）。 |
+| 可靠性 | 78 | 0.10 | 7.8 | 1. `memrpc/src/client/rpc_client.cpp:61` — 自定义 `UniqueFd` RAII 类确保 fd 在异常路径中被关闭。 2. `memrpc/include/memrpc/core/runtime_utils.h:24` — `ScopeExit` / `MakeScopeExit` 提供轻量级 RAII 退出动作。 3. `memrpc/src/server/rpc_server.cpp:193` — `MakeSubmittedTaskToken` 利用 `shared_ptr` 自定义 deleter 实现任务完成计数。 4. `virus_executor_service/src/transport/ves_control_proxy.cpp:234` — 实现了完整的死亡回调（DeathRecipient）与死亡事件分发。 5. `virus_executor_service/src/service/ves_session_service.cpp:213` — `CloseSession` 将 `rpcServer_` 移出锁外再执行 `stop/join`，避免持有 `initMutex_` 时长时间阻塞。 | 1. `memrpc/src/server/rpc_server.cpp:835` — `Stop()` 超时时调用 `std::_Exit(EXIT_FAILURE)` 强制终止宿主进程，建议改为返回错误码（预计扣 5 分）。 2. `memrpc/src/client/rpc_client.cpp:154` / `rpc_server.cpp:474` / `rpc_server.cpp:543` — 多处 `condition_variable::wait` 无限期阻塞，存在挂死风险，建议增加安全超时（预计扣 4 分）。 3. `virus_executor_service/src/transport/ves_control_proxy.cpp:114` — `JoinThread` 存在自我 `detach` 导致资源泄漏的风险，建议使用 joinable 标志 + 条件变量退出（预计扣 2 分）。 |
+| 可测试性 | 81 | 0.15 | 12.15 | 1. `memrpc/include/memrpc/core/bootstrap.h:54` — `IBootstrapChannel` 纯虚接口便于 mock。 2. `memrpc/include/memrpc/core/task_executor.h:9` — `TaskExecutor` 纯虚接口可注入同步或受控 executor。 3. `memrpc/src/core/byte_reader.cpp` / `byte_writer.cpp` — 纯逻辑类，无隐藏依赖，极易单元测试。 4. `virus_executor_service/include/service/rpc_handler_registrar.h:11` — `RpcHandlerSink` 使用纯虚接口，便于注入 mock sink。 5. `virus_executor_service/include/ves/ves_session_service.h:21` — `VesSessionProvider` 与 `VesEventPublisher` 为纯虚接口，依赖可 mock。 | 1. `memrpc/src/client/rpc_client.cpp:161` — `RpcClient::Impl` 内部核心逻辑为私有嵌套类，无法被外部单元测试直接覆盖（预计扣 5 分）。 2. `virus_executor_service/src/service/virus_executor_service.cpp:191` — `OnStart` 中硬编码构造 `EngineSessionService`，无法通过依赖注入替换为 mock，建议通过工厂注入（预计扣 2 分）。 3. `virus_executor_service/src/transport/ves_control_proxy.cpp:234` — `VesBootstrapChannelState` 位于匿名 namespace 中，无法独立单元测试（预计扣 3 分）。 |
+| 高效性 | 83 | 0.15 | 12.45 | 1. `memrpc/src/core/shm_layout.h:28` — `RingCursor` 使用 `std::atomic<uint32_t>` 并配合 `static_assert` 确保 lock-free。 2. `memrpc/include/memrpc/core/runtime_utils.h:176` — `CpuRelax` 针对 x86_64/aarch64 使用 `pause`/`yield` 指令，降低自旋消耗。 3. `memrpc/src/server/rpc_server.cpp:594` — `DrainQueue` 只在 ring 从满变为不满时才 signal `reqCreditEventFd`，避免不必要的系统调用。 4. `virus_executor_service/include/ves/ves_codec.h:96` — `Decode` 时调用 `reserve(engineCount)`，避免 vector 多次重新分配。 5. `virus_executor_service/src/transport/registry_protocol.cpp:87` — 使用循环分片收发，避免一次发送超大 buffer 导致系统调用失败。 | 1. `memrpc/src/client/rpc_client.cpp:221` — `ClientRequestStore::TakeExpired` 线性遍历 `unordered_map` 找出超时请求，建议改为按 deadline 排序的容器（预计扣 4 分）。 2. `memrpc/src/core/log.cpp:31` — `NormalizeLogFormat` 在每次日志调用中都创建新字符串并逐字符扫描，建议缓存编译后的格式（预计扣 3 分）。 3. `virus_executor_service/src/transport/ves_control_proxy.cpp:735` — `Heartbeat` / `AnyCall` / `CloseSession` 每次调用均新建 Unix Domain Socket，建议引入连接复用（预计扣 4 分）。 |
+| 代码设计 | 81 | 0.15 | 12.15 | 1. `memrpc/include/memrpc/core/protocol.h:72` — 使用 `static_assert` + `offsetof` 验证协议结构二进制布局，确保跨版本兼容性。 2. `memrpc/include/memrpc/client/typed_future.h:15` — `TypedFuture` 模板提供类型安全消费层，将解码延迟到调用者线程。 3. `memrpc/include/memrpc/client/rpc_client.h` / `rpc_server.h` — 公共 API 简洁明了，符合框架库设计预期。 4. `virus_executor_service/include/transport/ves_control_proxy.h:51` — `VesBootstrapChannel` 使用 Pimpl 隐藏实现细节，编译依赖可控。 5. `virus_executor_service/include/transport/ves_control_interface.h:98` — `IVirusProtectionExecutor` 纯虚接口将客户端与服务端契约抽象化。 | 1. `memrpc/include/memrpc/server/handler.h:25` — `PayloadView` 同时提供 snake_case 与 PascalCase 两套重复接口，建议统一后删除别名（预计扣 3 分）。 2. `memrpc/include/memrpc/client/rpc_client.h:53` — `WaitAndDecode` 与 `typed_future.h:36` 的 `TypedFuture::Wait` 逻辑几乎重复，建议合并（预计扣 2 分）。 3. `virus_executor_service/include/service/virus_executor_service.h:16` — `VirusExecutorService` 同时继承 `SystemAbility` 与 `VesControlStub`，建议将 Stub 职责委托给独立成员（预计扣 2 分）。 4. `virus_executor_service/include/transport/ves_control_proxy.h:46` — 同时持有 `operationMutex_`、`connectionMutex_`、`callbackMutex_` 三把锁，建议合并为单一状态锁或定义严格锁层级（预计扣 2 分）。 |
+
+### 问题清单
+
+1. **[高] 可靠性-进程强制终止**: `memrpc/src/server/rpc_server.cpp:835` — `Stop()` 超时时调用 `std::_Exit(EXIT_FAILURE)` 强制终止宿主进程，会导致资源泄漏与数据丢失，应改为返回错误码。
+2. **[高] 可靠性-无限期阻塞**: `memrpc/src/client/rpc_client.cpp:154`、`memrpc/src/server/rpc_server.cpp:474/543` — 多处 `condition_variable::wait` 无限期阻塞，存在挂死风险，建议增加安全超时。
+3. **[高] 可维护性-Impl 神类**: `memrpc/src/client/rpc_client.cpp:161` — `RpcClient::Impl` 长达约 2100 行，融合会话管理、恢复状态机、请求存储、工作线程等全部职责，严重违反单一职责原则，建议拆分为组合式组件。
+4. **[中] 安全性-strncpy 未保证 null 终止**: `virus_executor_service/src/transport/registry_server.cpp:62`、`registry_client.cpp:31`、`ves_control_proxy.cpp:53` — 三处使用 `std::strncpy` 写入 `sockaddr_un.sun_path`，建议显式设置 `sun_path[sizeof-1] = '\0'`。
+5. **[中] 高效性-每次 RPC 新建 Socket**: `virus_executor_service/src/transport/ves_control_proxy.cpp:735` — `Heartbeat` / `AnyCall` / `CloseSession` 每次均新建 Unix Domain Socket 连接，系统调用开销大，建议引入连接复用或连接池。
+6. **[中] 可维护性-协议结构体重复定义**: `virus_executor_service/src/transport/ves_control_proxy.cpp:62` 与 `include/transport/ves_control_stub.h:15` — `SessionMetadata`、`AnyCallRequestHeader` 等重复定义，建议提取到公共 detail 头文件。
+7. **[中] 安全性-测试后门侵入生产代码**: `virus_executor_service/src/service/ves_engine_service.cpp:93` — `shouldCrash` 为 true 时调用 `std::abort()`，建议将 crash 行为抽离到 test-only 插件。
+8. **[中] 可维护性-Chaos 测试侵入生产路径**: `virus_executor_service/src/service/ves_session_service.cpp:266` — `RunCloseSessionChaos` 将确定性测试逻辑直接侵入生产关闭路径，建议通过 Hook 在外部注入。
+9. **[中] 高效性-日志格式字符串热点**: `memrpc/src/core/log.cpp:31` — `NormalizeLogFormat` 在每次日志调用中逐字符扫描并重建字符串，高吞吐下会成为 CPU 热点，建议缓存。
+10. **[中] 高效性-线性扫描超时请求**: `memrpc/src/client/rpc_client.cpp:221` — `TakeExpired` 线性遍历整个 `unordered_map`，建议改为按 deadline 排序的容器。
+11. **[低] 代码设计-接口重复命名**: `memrpc/include/memrpc/server/handler.h:25` — `PayloadView` 提供两套重复接口，增加维护成本，建议统一命名风格后删除别名。
+12. **[低] 可维护性-函数重复实现**: `memrpc/src/bootstrap/shared_memory_session_host.cpp:24` 与 `memrpc/src/core/session.cpp:22` — 存在两个功能相同的 `CloseFd` 辅助函数，建议提取到公共工具模块。
+
+### 改进建议
+
+1. **优先修复 `_Exit` 与无限期 wait 问题**: 这是框架层面的可靠性缺陷，影响宿主进程稳定性。建议将 `std::_Exit` 改为返回错误码或记录严重错误后返回；为所有 `condition_variable::wait` 增加超时保护。
+2. **拆分 `RpcClient::Impl` 神类**: 将 `ClientRequestStore`、`ClientRecoveryState`、`SubmitWorker`、`ResponseWorker` 等嵌套类提取为 `RpcClient` 的友元或独立内部组件，由 `Impl` 进行组合而非嵌套，显著提升可读性、可维护性与可测试性。
+3. **统一协议结构体定义并消除重复代码**: 提取 `ves_control_protocol_detail.h` 公共头文件，消除 `ves_control_proxy.cpp` 与 `ves_control_stub.h` 中的重复结构体定义；同时提取公共的 `CloseFd`、`AbortForMissingControlLoader` 等辅助函数。
+4. **优化 VesControlProxy 连接模型**: 将每次 RPC 新建 socket 改为长连接复用（至少复用心跳与常规调用连接），或在设计文档中明确说明性能 trade-off。
+5. **将测试专用逻辑移出生产路径**: 把 `ves_engine_service.cpp` 中的 `std::abort()` 后门和 `ves_session_service.cpp` 中的 Chaos 测试逻辑抽离到 test-only 插件或测试注入 Hook 中。
+6. **优化热点性能路径**: 为日志系统引入格式字符串缓存或编译期解析；将 `ClientRequestStore::TakeExpired` 的线性扫描改为按 deadline 排序的 `std::multimap` 或优先级队列。

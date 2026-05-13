@@ -463,4 +463,35 @@ TEST(RpcClientExternalRecoveryTest, RetryUntilRecoverySettlesWaitsAcrossExternal
     restartedServer.Stop();
 }
 
+TEST(RpcClientExternalRecoveryTest, RetryUntilRecoverySettlesReturnsImmediatelyAfterFirstSuccess)
+{
+    auto rawBootstrap = std::make_shared<DevBootstrapChannel>();
+    BootstrapHandles unusedHandles = MakeDefaultBootstrapHandles();
+    ASSERT_EQ(rawBootstrap->OpenSession(unusedHandles), StatusCode::Ok);
+    CloseHandles(unusedHandles);
+
+    RpcServer server;
+    StartEchoServer(rawBootstrap, &server);
+
+    RpcClient client(rawBootstrap);
+    ASSERT_EQ(client.Init(), StatusCode::Ok);
+
+    RpcCall call;
+    call.opcode = kEchoOpcode;
+
+    RpcReply reply;
+    std::atomic<int> invokeCount{0};
+    const StatusCode status = client.RetryUntilRecoverySettles([&]() {
+        invokeCount.fetch_add(1, std::memory_order_relaxed);
+        return client.InvokeAsync(call).Wait(&reply);
+    });
+
+    EXPECT_EQ(status, StatusCode::Ok);
+    EXPECT_EQ(reply.status, StatusCode::Ok);
+    EXPECT_EQ(invokeCount.load(std::memory_order_acquire), 1);
+
+    client.Shutdown();
+    server.Stop();
+}
+
 }  // namespace MemRpc

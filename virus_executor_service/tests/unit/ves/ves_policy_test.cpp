@@ -862,6 +862,8 @@ TEST(VesPolicyTest, ScanFileReportsClientClosedAfterPermanentLoaderFailure)
 
     ScanTask smallTask{"/data/reopen_should_report_closed.bin"};
     EXPECT_EQ(client->ScanFile(smallTask, &reply), MemRpc::StatusCode::ClientClosed);
+    const auto closedSnapshot = internal::VesClientRecoveryAccess::GetRecoveryRuntimeSnapshot(*client);
+    EXPECT_EQ(closedSnapshot.lifecycleState, MemRpc::ClientLifecycleState::Closed);
 
     const std::string longPath = "/data/" + std::string(MemRpc::DEFAULT_MAX_REQUEST_BYTES + 64, 'c');
     ScanTask oversizedTask{longPath};

@@ -60,7 +60,7 @@ public:
     {
         return empty();
     }
-    [[nodiscard]] const uint8_t& Rront() const
+    [[nodiscard]] const uint8_t& Front() const
     {
         return front();
     }
