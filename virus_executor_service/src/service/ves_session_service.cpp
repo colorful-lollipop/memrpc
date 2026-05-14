@@ -263,7 +263,7 @@ MemRpc::RpcServerRuntimeStats EngineSessionService::GetRuntimeStats() const
     return rpcServer_->GetRuntimeStats();
 }
 
-void EngineSessionService::RunCloseSessionChaos(CloseSessionStage stage)
+void EngineSessionService::RunCloseSessionChaos(CloseSessionStage stage) const
 {
     if (options_.closeSessionHook) {
         options_.closeSessionHook(stage);

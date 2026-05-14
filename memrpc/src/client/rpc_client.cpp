@@ -2036,6 +2036,7 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
         entry.execTimeoutMs = submit.call.execTimeoutMs;
         entry.opcode = submit.call.opcode;
         entry.priority = static_cast<uint8_t>(submit.call.priority);
+        entry.flags = submit.call.flags;
         entry.payloadSize = static_cast<uint32_t>(submit.call.payload.size());
         if (!submit.call.payload.empty()) {
             std::memcpy(entry.payload.data(), submit.call.payload.data(), submit.call.payload.size());

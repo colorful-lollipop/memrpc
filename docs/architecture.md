@@ -110,7 +110,7 @@ VPS 是业务层和集成层，知道 opcode 含义、扫描业务、控制面�
 
 这里定义了当前所有上层代码都必须遵守的事实：
 
-- `PROTOCOL_VERSION = 7`
+- `PROTOCOL_VERSION = 8`
 - `RING_ENTRY_BYTES = 8192`
 - 请求和响应都使用固定大小 entry
 - entry 头部字段固定，payload 直接 inline 在 entry 里
@@ -435,8 +435,8 @@ VPS 是业务层和集成层，知道 opcode 含义、扫描业务、控制面�
 - 注册 typed handler
 - 需要时通过 `VesEventPublisher` 发布业务事件
 
-`RegisterHandlers()` 是它和 `memrpc` 对接的关键点。这里通过业务层的 `RegisterTypedHandler<ScanTask, ScanFileReply>` 把 typed C++ lambda 绑定到某个 opcode。  
-这意味着业务代码平时写的是普通 C++ 结构和函数，而不是手动拼装字节流。
+`RegisterHandlers()` 是它和 `memrpc` 对接的关键点。VES 业务 handler 通过 `RegisterVesTypedHandler()` 统一处理普通内联 payload 或大请求 file payload envelope，再调用 typed C++ 业务函数。
+这意味着业务代码平时写的是普通 C++ 结构和函数，而不是手动拼装字节流；file payload 只是 VES transport 适配层细节。
 
 `ScanFile()` 当前是样例业务实现：
 

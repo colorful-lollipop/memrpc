@@ -6,6 +6,7 @@
 #include <thread>
 
 #include "ves/ves_codec.h"
+#include "ves/ves_handler_registration.h"
 #include "ves/ves_protocol.h"
 #include "ves/ves_sample_rules.h"
 #include "ves/ves_session_service.h"
@@ -146,9 +147,9 @@ MemRpc::StatusCode VesEngineService::PublishTextEvent(uint32_t eventType,
 
 void VesEngineService::RegisterHandlers(RpcHandlerSink* sink)
 {
-    RegisterTypedHandler<ScanTask, ScanFileReply>(sink,
-                                                  static_cast<MemRpc::Opcode>(VesOpcode::ScanFile),
-                                                  [this](const ScanTask& request) { return ScanFile(request); });
+    RegisterVesTypedHandler<ScanTask, ScanFileReply>(sink,
+                                                     static_cast<MemRpc::Opcode>(VesOpcode::ScanFile),
+                                                     [this](const ScanTask& request) { return ScanFile(request); });
 }
 
 }  // namespace VirusExecutorService

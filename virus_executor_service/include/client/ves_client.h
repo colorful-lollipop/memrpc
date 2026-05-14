@@ -61,7 +61,7 @@ private:
                                  uint32_t execTimeoutMs);
 
     MemRpc::StatusCode InitClient(MemRpc::ClientInitMode mode);
-    void ClaimProcessOwnership();
+    void ClaimProcessOwnership() const;
     [[nodiscard]] bool IsProcessOwner() const;
     [[nodiscard]] OHOS::sptr<IVirusProtectionExecutor> CurrentControl();
     friend class internal::VesClientRecoveryAccess;

@@ -60,7 +60,7 @@ private:
     MemRpc::StatusCode EnsureInitialized();
     void StartEventPublisherLocked();
     void EventPublisherLoop();
-    void RunCloseSessionChaos(CloseSessionStage stage);
+    void RunCloseSessionChaos(CloseSessionStage stage) const;
 
     std::vector<RpcHandlerRegistrar*> registrars_;
     EngineSessionServiceOptions options_;

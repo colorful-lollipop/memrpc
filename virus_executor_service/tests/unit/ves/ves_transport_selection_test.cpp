@@ -6,11 +6,13 @@
 #include <string>
 
 #include "client/ves_client.h"
-#include "memrpc/test_support/dev_bootstrap.h"
 #include "memrpc/core/codec.h"
 #include "memrpc/server/rpc_server.h"
+#include "memrpc/test_support/dev_bootstrap.h"
+#include "service/rpc_handler_registrar.h"
 #include "transport/ves_control_stub.h"
 #include "ves/ves_codec.h"
+#include "ves/ves_file_payload.h"
 #include "ves/ves_protocol.h"
 
 namespace VirusExecutorService {
@@ -38,37 +40,31 @@ void CloseHandles(MemRpc::BootstrapHandles& handles)
     }
 }
 
-void RegisterScanHandler(MemRpc::RpcServer* server, std::atomic<int>* memrpcCount)
+void RegisterScanHandler(MemRpc::RpcServer* server,
+                         std::atomic<int>* memrpcCount,
+                         std::atomic<MemRpc::RequestFlags>* lastFlags)
 {
     if (server == nullptr) {
         return;
     }
 
     server->RegisterHandler(static_cast<MemRpc::Opcode>(VesOpcode::ScanFile),
-                            [memrpcCount](const MemRpc::RpcServerCall& call, MemRpc::RpcServerReply* reply) {
-                                if (reply == nullptr) {
-                                    return;
-                                }
-
-                                ScanTask request;
-                                if (!MemRpc::DecodeMessage<ScanTask>(call.payload, &request)) {
-                                    reply->status = MemRpc::StatusCode::ProtocolMismatch;
-                                    return;
-                                }
-
-                                ScanFileReply scanReply;
-                                scanReply.code = 0;
-                                scanReply.threatLevel = request.path.find("fallback") != std::string::npos ? 2 : 1;
-                                if (!MemRpc::EncodeMessage(scanReply, &reply->payload)) {
-                                    reply->status = MemRpc::StatusCode::EngineInternalError;
-                                    reply->payload.clear();
-                                    return;
-                                }
-
-                                if (memrpcCount != nullptr) {
-                                    memrpcCount->fetch_add(1);
-                                }
-                            });
+                            MakeTypedHandlerWithDecoder<ScanTask, ScanFileReply>(
+                                [lastFlags](const MemRpc::RpcServerCall& call, ScanTask* request) {
+                                    if (lastFlags != nullptr) {
+                                        lastFlags->store(call.flags);
+                                    }
+                                    return DecodeVesRequestPayload(call, request);
+                                },
+                                [memrpcCount](const ScanTask& request) {
+                                    ScanFileReply scanReply;
+                                    scanReply.code = 0;
+                                    scanReply.threatLevel = request.path.find("fallback") != std::string::npos ? 2 : 1;
+                                    if (memrpcCount != nullptr) {
+                                        memrpcCount->fetch_add(1);
+                                    }
+                                    return scanReply;
+                                }));
 }
 
 class FakeClientControl final : public VesControlStub {
@@ -81,7 +77,7 @@ public:
         CloseHandles(warmup);
 
         server_ = std::make_unique<MemRpc::RpcServer>(bootstrap_->serverHandles());
-        RegisterScanHandler(server_.get(), &memrpcCount_);
+        RegisterScanHandler(server_.get(), &memrpcCount_, &lastFlags_);
         EXPECT_EQ(server_->Start(), MemRpc::StatusCode::Ok);
     }
 
@@ -152,46 +148,64 @@ public:
         return anyCallCount_.load();
     }
 
+    [[nodiscard]] MemRpc::RequestFlags lastFlags() const
+    {
+        return lastFlags_.load();
+    }
+
 private:
     std::shared_ptr<MemRpc::DevBootstrapChannel> bootstrap_;
     std::unique_ptr<MemRpc::RpcServer> server_;
     std::atomic<bool> sessionOpen_{false};
     std::atomic<int> memrpcCount_{0};
     std::atomic<int> anyCallCount_{0};
+    std::atomic<MemRpc::RequestFlags> lastFlags_{MemRpc::REQUEST_FLAG_NONE};
+};
+
+class VesClientHarness {
+public:
+    VesClientHarness()
+        : control(std::make_shared<FakeClientControl>()),
+          client([control = control]() -> OHOS::sptr<IVirusProtectionExecutor> { return control; })
+    {
+        EXPECT_EQ(client.Init(), MemRpc::StatusCode::Ok);
+    }
+
+    ~VesClientHarness()
+    {
+        client.Shutdown();
+    }
+
+    std::shared_ptr<FakeClientControl> control;
+    VesClient client;
 };
 
 }  // namespace
 
 TEST(VesTransportSelectionTest, SmallScanFileUsesMemrpcPath)
 {
-    auto control = std::make_shared<FakeClientControl>();
-    VesClient client([control]() -> OHOS::sptr<IVirusProtectionExecutor> { return control; });
-    ASSERT_EQ(client.Init(), MemRpc::StatusCode::Ok);
+    VesClientHarness harness;
 
     ScanTask task{"/data/small.bin"};
     ScanFileReply reply;
-    ASSERT_EQ(client.ScanFile(task, &reply), MemRpc::StatusCode::Ok);
+    ASSERT_EQ(harness.client.ScanFile(task, &reply), MemRpc::StatusCode::Ok);
     EXPECT_EQ(reply.threatLevel, 1);
-    EXPECT_EQ(control->memrpcCount(), 1);
-    EXPECT_EQ(control->anyCallCount(), 0);
-
-    client.Shutdown();
+    EXPECT_EQ(harness.control->memrpcCount(), 1);
+    EXPECT_EQ(harness.control->anyCallCount(), 0);
+    EXPECT_EQ(harness.control->lastFlags(), MemRpc::REQUEST_FLAG_NONE);
 }
 
-TEST(VesTransportSelectionTest, OversizedScanFileUsesFallbackPath)
+TEST(VesTransportSelectionTest, OversizedScanFileUsesFilePayloadMemrpcPath)
 {
-    auto control = std::make_shared<FakeClientControl>();
-    VesClient client([control]() -> OHOS::sptr<IVirusProtectionExecutor> { return control; });
-    ASSERT_EQ(client.Init(), MemRpc::StatusCode::Ok);
+    VesClientHarness harness;
 
     ScanTask task{"/data/" + std::string(MemRpc::DEFAULT_MAX_REQUEST_BYTES + 128, 'x')};
     ScanFileReply reply;
-    ASSERT_EQ(client.ScanFile(task, &reply), MemRpc::StatusCode::Ok);
-    EXPECT_EQ(reply.threatLevel, 3);
-    EXPECT_EQ(control->memrpcCount(), 0);
-    EXPECT_EQ(control->anyCallCount(), 1);
-
-    client.Shutdown();
+    ASSERT_EQ(harness.client.ScanFile(task, &reply), MemRpc::StatusCode::Ok);
+    EXPECT_EQ(reply.threatLevel, 1);
+    EXPECT_EQ(harness.control->memrpcCount(), 1);
+    EXPECT_EQ(harness.control->anyCallCount(), 0);
+    EXPECT_NE(harness.control->lastFlags() & VES_REQUEST_FLAG_FILE_PAYLOAD_REF, 0u);
 }
 
 }  // namespace VirusExecutorService

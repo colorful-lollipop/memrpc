@@ -9,6 +9,7 @@
 #include "iservice_registry.h"
 #include "transport/ves_control_interface.h"
 #include "ves/ves_codec.h"
+#include "ves/ves_file_payload.h"
 #include "ves/ves_protocol.h"
 #include "virus_protection_executor_log.h"
 
@@ -20,8 +21,7 @@ std::atomic<uint64_t> g_activeVesClientGeneration{0};
 
 bool EngineDeathLimitReached(const std::shared_ptr<std::atomic<uint32_t>>& engineDeathCount, uint32_t limit)
 {
-    return limit > 0 && engineDeathCount != nullptr &&
-           engineDeathCount->load(std::memory_order_acquire) >= limit;
+    return limit > 0 && engineDeathCount != nullptr && engineDeathCount->load(std::memory_order_acquire) >= limit;
 }
 
 void ResetRestartBudget(const std::shared_ptr<std::atomic<uint32_t>>& engineDeathCount)
@@ -55,7 +55,7 @@ MemRpc::RecoveryDecision ApplyRestartBudget(const MemRpc::RecoveryDecision& deci
 }
 
 MemRpc::RecoveryPolicy BuildRecoveryPolicy(const VesClientOptions& options,
-                                          const std::shared_ptr<std::atomic<uint32_t>>& engineDeathCount)
+                                           const std::shared_ptr<std::atomic<uint32_t>>& engineDeathCount)
 {
     MemRpc::RecoveryPolicy policy = options.recoveryPolicy;
     auto onFailure = policy.onFailure;
@@ -82,12 +82,12 @@ MemRpc::RecoveryPolicy BuildRecoveryPolicy(const VesClientOptions& options,
             };
         };
     }
-    policy.onEngineDeath = [onEngineDeath = std::move(onEngineDeath),
-                            engineDeathCount,
-                            maxDeaths = options.maxEngineDeathsBeforePermanentStop](
-                               const MemRpc::EngineDeathReport& report) mutable {
-        return ApplyRestartBudget(onEngineDeath(report), engineDeathCount, maxDeaths, "engine_death");
-    };
+    policy.onEngineDeath =
+        [onEngineDeath = std::move(onEngineDeath),
+         engineDeathCount,
+         maxDeaths = options.maxEngineDeathsBeforePermanentStop](const MemRpc::EngineDeathReport& report) mutable {
+            return ApplyRestartBudget(onEngineDeath(report), engineDeathCount, maxDeaths, "engine_death");
+        };
     if (!policy.onIdle && options.idleShutdownTimeoutMs > 0) {
         policy.onIdle = [timeout = options.idleShutdownTimeoutMs](uint64_t idleMs) {
             if (idleMs < timeout) {
@@ -128,27 +128,23 @@ VesClient::ControlLoader BuildControlLoader(VesClientConnectOptions connectOptio
 
 struct VesInvokeExecutionContext {
     MemRpc::RpcClient* client = nullptr;
-    OHOS::sptr<IVirusProtectionExecutor> control;
-    bool shutdownOnMissingControl = false;
 };
 
 struct VesInvokeRequestView {
     MemRpc::Opcode opcode = MemRpc::OPCODE_INVALID;
     MemRpc::Priority priority = MemRpc::Priority::Normal;
+    MemRpc::RequestFlags flags = MemRpc::REQUEST_FLAG_NONE;
     uint32_t execTimeoutMs = 0;
     const std::vector<uint8_t>* payload = nullptr;
 };
 
-std::string ToBinaryString(const std::vector<uint8_t>& payload)
-{
-    if (payload.empty()) {
-        return {};
-    }
-    return std::string(reinterpret_cast<const char*>(payload.data()), payload.size());
-}
+struct VesPreparedInvoke {
+    std::vector<uint8_t> payload;
+    MemRpc::RequestFlags flags = MemRpc::REQUEST_FLAG_NONE;
+};
 
 template <typename Reply>
-MemRpc::StatusCode InvokeInlineApi(const VesInvokeExecutionContext& context,
+MemRpc::StatusCode InvokeMemRpcApi(const VesInvokeExecutionContext& context,
                                    const VesInvokeRequestView& request,
                                    Reply* reply)
 {
@@ -159,60 +155,11 @@ MemRpc::StatusCode InvokeInlineApi(const VesInvokeExecutionContext& context,
     MemRpc::RpcCall call;
     call.opcode = request.opcode;
     call.priority = request.priority;
+    call.flags = request.flags;
     call.execTimeoutMs = request.execTimeoutMs;
     call.payload = *request.payload;
     return MemRpc::WaitAndDecode<Reply>(context.client->InvokeAsync(std::move(call)), reply);
 }
-
-template <typename Reply>
-MemRpc::StatusCode InvokeAnyCallApi(const VesInvokeExecutionContext& context,
-                                    const VesInvokeRequestView& request,
-                                    Reply* reply)
-{
-    if (context.control == nullptr) {
-        HILOGE("VesClient::InvokeApi failed: control is null opcode=%{public}u shutdown=%{public}s",
-               request.opcode,
-               context.shutdownOnMissingControl ? "true" : "false");
-        return context.shutdownOnMissingControl ? MemRpc::StatusCode::ClientClosed
-                                                : MemRpc::StatusCode::PeerDisconnected;
-    }
-    if (request.payload == nullptr) {
-        return MemRpc::StatusCode::InvalidArgument;
-    }
-
-    VesAnyCallRequest anyRequest;
-    anyRequest.opcode = static_cast<uint16_t>(request.opcode);
-    anyRequest.priority = static_cast<uint16_t>(request.priority);
-    anyRequest.timeoutMs = request.execTimeoutMs;
-    anyRequest.payload = ToBinaryString(*request.payload);
-
-    VesAnyCallReply anyReply;
-    const MemRpc::StatusCode status = context.control->AnyCall(anyRequest, anyReply);
-    if (status != MemRpc::StatusCode::Ok) {
-        HILOGE("VesClient::InvokeApi AnyCall failed opcode=%{public}u status=%{public}d",
-               request.opcode,
-               static_cast<int>(status));
-        return status;
-    }
-    if (anyReply.status != MemRpc::StatusCode::Ok) {
-        HILOGE("VesClient::InvokeApi AnyCall reply failed opcode=%{public}u status=%{public}d",
-               request.opcode,
-               static_cast<int>(anyReply.status));
-        return anyReply.status;
-    }
-    if (!MemRpc::DecodeMessage<Reply>(anyReply.payload, reply)) {
-        HILOGE("VesClient::InvokeApi decode failed opcode=%{public}u payload_size=%{public}zu",
-               request.opcode,
-               anyReply.payload.size());
-        return MemRpc::StatusCode::ProtocolMismatch;
-    }
-    return MemRpc::StatusCode::Ok;
-}
-
-enum class VesInvokeRoute : uint8_t {
-    InlineMemRpc = 0,
-    AnyCall = 1,
-};
 
 template <typename Request>
 MemRpc::StatusCode EncodeInvokePayload(MemRpc::Opcode opcode, const Request& request, std::vector<uint8_t>* payload)
@@ -224,24 +171,27 @@ MemRpc::StatusCode EncodeInvokePayload(MemRpc::Opcode opcode, const Request& req
     return MemRpc::StatusCode::Ok;
 }
 
-template <typename Reply>
-MemRpc::StatusCode ExecuteInvokeRoute(VesInvokeRoute route,
-                                      const VesInvokeExecutionContext& context,
-                                      const VesInvokeRequestView& request,
-                                      Reply* reply)
+template <typename Request>
+MemRpc::StatusCode PrepareInvokePayload(MemRpc::Opcode opcode, const Request& request, VesPreparedInvoke* prepared)
 {
-    if (context.client == nullptr || request.payload == nullptr) {
+    if (prepared == nullptr) {
         return MemRpc::StatusCode::InvalidArgument;
     }
+    prepared->payload.clear();
+    prepared->flags = MemRpc::REQUEST_FLAG_NONE;
 
-    switch (route) {
-        case VesInvokeRoute::InlineMemRpc:
-            return InvokeInlineApi(context, request, reply);
-        case VesInvokeRoute::AnyCall:
-            return InvokeAnyCallApi(context, request, reply);
-        default:
-            return MemRpc::StatusCode::InvalidArgument;
+    MemRpc::StatusCode status = EncodeInvokePayload(opcode, request, &prepared->payload);
+    if (status != MemRpc::StatusCode::Ok) {
+        return status;
     }
+
+    status = PrepareVesFilePayloadForMemRpc(&prepared->payload, &prepared->flags);
+    if (status != MemRpc::StatusCode::Ok) {
+        HILOGE("VesClient::InvokeApi prepare payload failed opcode=%{public}u status=%{public}d",
+               opcode,
+               static_cast<int>(status));
+    }
+    return status;
 }
 
 }  // namespace
@@ -301,7 +251,7 @@ MemRpc::StatusCode VesClient::InitClient(MemRpc::ClientInitMode mode)
     return MemRpc::StatusCode::Ok;
 }
 
-void VesClient::ClaimProcessOwnership()
+void VesClient::ClaimProcessOwnership() const
 {
     g_activeVesClientGeneration.store(instanceGeneration_, std::memory_order_release);
 }
@@ -346,34 +296,24 @@ MemRpc::StatusCode VesClient::InvokeApi(MemRpc::Opcode opcode,
         return MemRpc::StatusCode::ClientClosed;
     }
 
-    std::vector<uint8_t> payload;
-    MemRpc::StatusCode status = EncodeInvokePayload(opcode, request, &payload);
+    VesPreparedInvoke prepared;
+    MemRpc::StatusCode status = PrepareInvokePayload(opcode, request, &prepared);
     if (status != MemRpc::StatusCode::Ok) {
         return status;
     }
 
-    VesInvokeRoute route = VesInvokeRoute::InlineMemRpc;
-    if (payload.size() > MemRpc::DEFAULT_MAX_REQUEST_BYTES) {
-        HILOGW("VesClient::InvokeApi oversized request uses AnyCall: size=%{public}zu/%{public}zu",
-               payload.size(),
-               MemRpc::DEFAULT_MAX_REQUEST_BYTES);
-        route = VesInvokeRoute::AnyCall;
-    }
-
+    const VesInvokeExecutionContext context{
+        &client_,
+    };
     const VesInvokeRequestView invokeRequest{
         opcode,
         priority,
+        prepared.flags,
         execTimeoutMs,
-        &payload,
+        &prepared.payload,
     };
     status = client_.RetryUntilRecoverySettles([&]() {
-        const auto control = CurrentControl();
-        const VesInvokeExecutionContext context{
-            &client_,
-            control,
-            control == nullptr && bootstrapChannel_ != nullptr && bootstrapChannel_->HasFatalControlLoadFailure(),
-        };
-        const MemRpc::StatusCode invokeStatus = ExecuteInvokeRoute(route, context, invokeRequest, reply);
+        const MemRpc::StatusCode invokeStatus = InvokeMemRpcApi(context, invokeRequest, reply);
         if (invokeStatus == MemRpc::StatusCode::Ok) {
             ResetRestartBudget(engineDeathCount_);
         }

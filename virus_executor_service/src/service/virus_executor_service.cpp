@@ -8,6 +8,7 @@
 #include "iservice_registry.h"
 #include "memrpc/core/codec.h"
 #include "ves/ves_codec.h"
+#include "ves/ves_file_payload.h"
 #include "ves/ves_protocol.h"
 #include "virus_protection_executor_log.h"
 
@@ -167,7 +168,8 @@ MemRpc::StatusCode VirusExecutorService::AnyCall(const VesAnyCallRequest& reques
     MemRpc::RpcServerCall call;
     call.opcode = static_cast<MemRpc::Opcode>(request.opcode);
     call.priority = static_cast<MemRpc::Priority>(request.priority);
-    call.payload = MemRpc::PayloadView(reinterpret_cast<const uint8_t*>(request.payload.data()), request.payload.size());
+    call.payload =
+        MemRpc::PayloadView(reinterpret_cast<const uint8_t*>(request.payload.data()), request.payload.size());
 
     MemRpc::RpcReply reply;
     vesReply.status = sessionService->InvokeAnyCall(call, &reply);
@@ -183,6 +185,7 @@ void VirusExecutorService::OnStart()
 {
     HILOGI("OnStart sa_id=%{public}d", GetSystemAbilityId());
     stopping_.store(false);
+    ClearVesFilePayloads();
     testkitService_.SetFaultInjectionEnabled(IsTestkitFaultInjectionEnabled());
     {
         std::lock_guard<std::mutex> lock(lifecycleMutex_);
@@ -209,6 +212,7 @@ void VirusExecutorService::OnStop()
     }
     service_.SetEventPublisher({});
     service_.ResetEngines();
+    ClearVesFilePayloads();
     OHOS::SystemAbility::OnStop();
 }
 

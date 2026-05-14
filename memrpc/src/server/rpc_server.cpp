@@ -398,6 +398,7 @@ struct RpcServer::Impl : public std::enable_shared_from_this<RpcServer::Impl> {
         RpcServerCall call;
         call.opcode = requestEntry.opcode;
         call.priority = IsHighPriority(requestEntry) ? Priority::High : Priority::Normal;
+        call.flags = requestEntry.flags;
         call.execTimeoutMs = requestEntry.execTimeoutMs;
         call.payload = PayloadView(requestEntry.payload.data(), requestEntry.payloadSize);
         return call;

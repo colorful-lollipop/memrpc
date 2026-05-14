@@ -229,6 +229,40 @@ TEST(RpcServerExecutorTest, CustomExecutorGatesDrain)
     server.Stop();
 }
 
+TEST(RpcServerExecutorTest, RequestFlagsReachHandler)
+{
+    auto bootstrap = std::make_shared<MemRpc::DevBootstrapChannel>();
+    MemRpc::BootstrapHandles unusedHandles = MemRpc::MakeDefaultBootstrapHandles();
+    ASSERT_EQ(bootstrap->OpenSession(unusedHandles), MemRpc::StatusCode::Ok);
+
+    MemRpc::RpcServer server;
+    server.SetBootstrapHandles(bootstrap->serverHandles());
+
+    MemRpc::RequestFlags observedFlags = MemRpc::REQUEST_FLAG_NONE;
+    server.RegisterHandler(kTestOpcode, [&observedFlags](const MemRpc::RpcServerCall& call,
+                                                         MemRpc::RpcServerReply* reply) {
+        observedFlags = call.flags;
+        if (reply != nullptr) {
+            reply->status = MemRpc::StatusCode::Ok;
+        }
+    });
+    ASSERT_EQ(server.Start(), MemRpc::StatusCode::Ok);
+
+    MemRpc::RpcClient client(bootstrap);
+    ASSERT_EQ(client.Init(), MemRpc::StatusCode::Ok);
+
+    MemRpc::RpcCall call;
+    call.opcode = kTestOpcode;
+    call.flags = MemRpc::REQUEST_FLAG_APPLICATION_0;
+
+    MemRpc::RpcReply reply;
+    EXPECT_EQ(std::move(client.InvokeAsync(call)).Wait(&reply), MemRpc::StatusCode::Ok);
+    EXPECT_EQ(observedFlags, MemRpc::REQUEST_FLAG_APPLICATION_0);
+
+    client.Shutdown();
+    server.Stop();
+}
+
 TEST(RpcServerExecutorTest, RuntimeStatsTrackActiveRequestExecution)
 {
     auto bootstrap = std::make_shared<MemRpc::DevBootstrapChannel>();

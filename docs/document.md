@@ -142,7 +142,7 @@ struct RequestRingEntry {
     uint32_t execTimeoutMs;    // 执行超时时间
     uint16_t opcode;           // 操作码 (如 ScanFile=102)
     uint8_t  priority;         // 优先级 (0=Normal, 1=High)
-    uint8_t  reserved0;
+    uint8_t  flags;            // 应用自定义请求标志
     uint32_t payloadSize;      // 有效载荷大小
     
     // INLINE_PAYLOAD_BYTES = 8192 - 24 = 8168 bytes
@@ -708,15 +708,14 @@ MemRpc::StatusCode VesClient::InvokeApi(MemRpc::Opcode opcode,
     std::vector<uint8_t> payload;
     EncodeInvokePayload(opcode, request, &payload);
     
-    // 2.2 选择路由：小请求用共享内存，大请求降级到AnyCall
-    VesInvokeRoute route = VesInvokeRoute::InlineMemRpc;
-    if (payload.size() > MemRpc::DEFAULT_MAX_REQUEST_BYTES) {
-        route = VesInvokeRoute::AnyCall;
-    }
+    // 2.2 准备 memrpc payload：小请求原样走共享内存；
+    //     超限请求先写入 VES file payload，共享内存只传 file payload envelope。
+    MemRpc::RequestFlags requestFlags = MemRpc::REQUEST_FLAG_NONE;
+    PrepareVesFilePayloadForMemRpc(&payload, &requestFlags);
     
-    // 2.3 执行调用，自动处理恢复
+    // 2.3 执行 memrpc 调用，自动处理恢复
     return client_.RetryUntilRecoverySettles([&]() {
-        return ExecuteInvokeRoute(route, context, invokeRequest, reply);
+        return InvokeMemRpcApi(context, opcode, priority, requestFlags, execTimeoutMs, payload, reply);
     });
 }
 ```
@@ -724,11 +723,10 @@ MemRpc::StatusCode VesClient::InvokeApi(MemRpc::Opcode opcode,
 **服务端Handler注册** (`ves_engine_service.cpp`):
 ```cpp
 void VesEngineService::RegisterHandlers(RpcHandlerSink* sink) {
-    RegisterTypedHandler<ScanTask, ScanFileReply>(
+    RegisterVesTypedHandler<ScanTask, ScanFileReply>(
         sink,
         static_cast<MemRpc::Opcode>(VesOpcode::ScanFile),
-        [this](const ScanTask& request) { return ScanFile(request); }
-    );
+        [this](const ScanTask& request) { return ScanFile(request); });
 }
 
 // 业务逻辑实现

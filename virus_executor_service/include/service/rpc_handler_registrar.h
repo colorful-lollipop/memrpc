@@ -48,30 +48,57 @@ inline void RegisterHandlersToServer(RpcHandlerRegistrar* registrar, MemRpc::Rpc
     registrar->RegisterHandlers(&sink);
 }
 
+template <typename Request, typename Reply, typename Decoder, typename Handler>
+inline MemRpc::RpcHandler MakeTypedHandlerWithDecoder(Decoder decoder, Handler handler)
+{
+    return [decode = std::move(decoder), h = std::move(handler)](const MemRpc::RpcServerCall& call,
+                                                                 MemRpc::RpcReply* reply) {
+        if (reply == nullptr) {
+            return;
+        }
+
+        Request request;
+        if (!decode(call, &request)) {
+            reply->status = MemRpc::StatusCode::ProtocolMismatch;
+            return;
+        }
+
+        if (!MemRpc::EncodeMessage<Reply>(h(request), &reply->payload)) {
+            reply->status = MemRpc::StatusCode::EngineInternalError;
+            reply->payload.clear();
+        }
+    };
+}
+
+template <typename Request, typename Reply, typename Handler>
+inline MemRpc::RpcHandler MakeTypedHandler(Handler handler)
+{
+    return MakeTypedHandlerWithDecoder<Request, Reply>(
+        [](const MemRpc::RpcServerCall& call, Request* request) {
+            return MemRpc::DecodeMessage<Request>(call.payload, request);
+        },
+        std::move(handler));
+}
+
+template <typename Request, typename Reply, typename Decoder, typename Handler>
+inline void RegisterTypedHandlerWithDecoder(RpcHandlerSink* sink,
+                                            MemRpc::Opcode opcode,
+                                            Decoder decoder,
+                                            Handler handler)
+{
+    if (sink == nullptr) {
+        return;
+    }
+    sink->RegisterHandler(opcode, MakeTypedHandlerWithDecoder<Request, Reply>(std::move(decoder), std::move(handler)));
+}
+
 template <typename Request, typename Reply, typename Handler>
 inline void RegisterTypedHandler(RpcHandlerSink* sink, MemRpc::Opcode opcode, Handler handler)
 {
     if (sink == nullptr) {
         return;
     }
-
-    sink->RegisterHandler(opcode,
-                          [h = std::move(handler)](const MemRpc::RpcServerCall& call, MemRpc::RpcReply* reply) {
-                              if (reply == nullptr) {
-                                  return;
-                              }
-
-                              Request request;
-                              if (!MemRpc::DecodeMessage<Request>(call.payload, &request)) {
-                                  reply->status = MemRpc::StatusCode::ProtocolMismatch;
-                                  return;
-                              }
-
-                              if (!MemRpc::EncodeMessage<Reply>(h(request), &reply->payload)) {
-                                  reply->status = MemRpc::StatusCode::EngineInternalError;
-                                  reply->payload.clear();
-                              }
-                          });
+    sink->RegisterHandler(opcode, MakeTypedHandler<Request, Reply>(std::move(handler)));
 }
 
 }  // namespace VirusExecutorService

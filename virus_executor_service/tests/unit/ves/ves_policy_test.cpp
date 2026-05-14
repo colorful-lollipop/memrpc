@@ -1,15 +1,17 @@
 #include <gtest/gtest.h>
 
+#include <dirent.h>
 #include <unistd.h>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <future>
+#include <cstdlib>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <thread>
-#include <utility>
 #include <unordered_map>
+#include <utility>
 
 #define private public
 #include "client/ves_client.h"
@@ -17,14 +19,17 @@
 #include "client/internal/ves_client_recovery_access.h"
 #include "isam_backend.h"
 #include "iservice_registry.h"
-#include "memrpc/test_support/dev_bootstrap.h"
 #include "memrpc/client/rpc_client.h"
 #include "memrpc/core/codec.h"
 #include "memrpc/server/rpc_server.h"
+#include "memrpc/test_support/dev_bootstrap.h"
+#include "service/rpc_handler_registrar.h"
 #include "service/virus_executor_service.h"
 #include "system_ability.h"
 #include "transport/ves_control_stub.h"
 #include "ves/ves_codec.h"
+#include "ves/ves_file_payload.h"
+#include "ves/ves_handler_registration.h"
 #include "ves/ves_protocol.h"
 #include "ves/ves_types.h"
 
@@ -98,6 +103,54 @@ void CloseHandles(MemRpc::BootstrapHandles& handles)
     }
 }
 
+class ScopedFilePayloadDir {
+public:
+    ScopedFilePayloadDir()
+    {
+        path_ = "/tmp/ves_policy_file_payload_" + std::to_string(getpid());
+        setenv("VES_FILE_PAYLOAD_DIR", path_.c_str(), 1);
+        ClearVesFilePayloads();
+    }
+
+    ~ScopedFilePayloadDir()
+    {
+        ClearVesFilePayloads();
+        rmdir(path_.c_str());
+        unsetenv("VES_FILE_PAYLOAD_DIR");
+    }
+
+    [[nodiscard]] const std::string& path() const
+    {
+        return path_;
+    }
+
+private:
+    std::string path_;
+};
+
+int CountFilePayloadFiles(const std::string& path)
+{
+    DIR* stream = opendir(path.c_str());
+    if (stream == nullptr) {
+        return 0;
+    }
+    int count = 0;
+    while (dirent* entry = readdir(stream)) {
+        const std::string name = entry->d_name;
+        if (name == "." || name == "..") {
+            continue;
+        }
+        const std::string entryPath = path + "/" + name;
+        if (name.rfind("ves_file_payload_", 0) == 0 || name.rfind("ves_payload_", 0) == 0) {
+            ++count;
+        } else {
+            count += CountFilePayloadFiles(entryPath);
+        }
+    }
+    closedir(stream);
+    return count;
+}
+
 void UnloadControlService()
 {
     auto& samClient = OHOS::SystemAbilityManagerClient::GetInstance();
@@ -128,23 +181,7 @@ void RegisterScanHandler(MemRpc::RpcServer* server, std::function<ScanFileReply(
     }
 
     server->RegisterHandler(static_cast<MemRpc::Opcode>(VesOpcode::ScanFile),
-                            [handler = std::move(handler)](const MemRpc::RpcServerCall& call,
-                                                           MemRpc::RpcServerReply* reply) {
-                                if (reply == nullptr) {
-                                    return;
-                                }
-
-                                ScanTask request;
-                                if (!MemRpc::DecodeMessage<ScanTask>(call.payload, &request)) {
-                                    reply->status = MemRpc::StatusCode::ProtocolMismatch;
-                                    return;
-                                }
-
-                                if (!MemRpc::EncodeMessage(handler(request), &reply->payload)) {
-                                    reply->status = MemRpc::StatusCode::EngineInternalError;
-                                    reply->payload.clear();
-                                }
-                            });
+                            MakeVesTypedHandler<ScanTask, ScanFileReply>(std::move(handler)));
 }
 
 MemRpc::RpcFuture StartAsyncScan(VesClient& client, const std::string& path, uint32_t execTimeoutMs = 30000)
@@ -526,7 +563,8 @@ TEST(VesPolicyTest, VesClientRecoversFromHeartbeatFailureWithoutClientLoop)
 
     std::atomic<bool> reboundServer{false};
     std::thread reboundThread([&]() {
-        const bool reopened = WaitFor([&]() { return service->openCount() > initialOpenCount; }, std::chrono::seconds(2));
+        const bool reopened =
+            WaitFor([&]() { return service->openCount() > initialOpenCount; }, std::chrono::seconds(2));
         if (!reopened) {
             return;
         }
@@ -589,7 +627,8 @@ TEST(VesPolicyTest, VesClientScanFileRetriesAcrossRestartCooldown)
     ASSERT_EQ(client->ScanFile(initialTask, &reply), MemRpc::StatusCode::Ok);
     EXPECT_EQ(reply.threatLevel, 0);
 
-    const uint64_t initialSessionId = internal::VesClientRecoveryAccess::GetRecoveryRuntimeSnapshot(*client).currentSessionId;
+    const uint64_t initialSessionId =
+        internal::VesClientRecoveryAccess::GetRecoveryRuntimeSnapshot(*client).currentSessionId;
     RequestRecoveryForTest(*client, 120);
     const auto cooldownSnapshot = internal::VesClientRecoveryAccess::GetRecoveryRuntimeSnapshot(*client);
     EXPECT_EQ(cooldownSnapshot.lifecycleState, MemRpc::ClientLifecycleState::Cooldown);
@@ -663,7 +702,8 @@ TEST(VesPolicyTest, VesClientScanFileHonorsRequestedRecoveryDelayBeyondConfigure
 
     auto server = startServerForCurrentSession();
 
-    const uint64_t initialSessionId = internal::VesClientRecoveryAccess::GetRecoveryRuntimeSnapshot(*client).currentSessionId;
+    const uint64_t initialSessionId =
+        internal::VesClientRecoveryAccess::GetRecoveryRuntimeSnapshot(*client).currentSessionId;
     RequestRecoveryForTest(*client, 400);
     const auto cooldownSnapshot = internal::VesClientRecoveryAccess::GetRecoveryRuntimeSnapshot(*client);
     EXPECT_EQ(cooldownSnapshot.lifecycleState, MemRpc::ClientLifecycleState::Cooldown);
@@ -705,8 +745,9 @@ TEST(VesPolicyTest, VesClientScanFileHonorsRequestedRecoveryDelayBeyondConfigure
     UnloadControlService();
 }
 
-TEST(VesPolicyTest, VesClientUsesRpcClientRecoveryInvokeForAnyCallFallback)
+TEST(VesPolicyTest, VesClientUsesRpcClientRecoveryInvokeForFilePayload)
 {
+    ScopedFilePayloadDir payloadDir;
     UnloadControlService();
     const std::string socketPath = "/tmp/ves_restart_anycall_" + std::to_string(getpid()) + ".sock";
     UseInMemorySamBackend();
@@ -725,11 +766,20 @@ TEST(VesPolicyTest, VesClientUsesRpcClientRecoveryInvokeForAnyCallFallback)
 
     RequestRecoveryForTest(*client, 120);
 
+    std::unique_ptr<MemRpc::RpcServer> server;
     std::thread reopenThread([&]() {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
         MemRpc::BootstrapHandles reopened = MemRpc::MakeDefaultBootstrapHandles();
         if (service->OpenSession(DefaultVesOpenSessionRequest(), reopened) == MemRpc::StatusCode::Ok) {
             CloseHandles(reopened);
+            server = std::make_unique<MemRpc::RpcServer>(service->serverHandles());
+            RegisterScanHandler(server.get(), [](const ScanTask& request) {
+                ScanFileReply reply;
+                reply.code = 0;
+                reply.threatLevel = request.path.find("recovered") != std::string::npos ? 1 : 0;
+                return reply;
+            });
+            EXPECT_EQ(server->Start(), MemRpc::StatusCode::Ok);
         }
     });
 
@@ -743,12 +793,16 @@ TEST(VesPolicyTest, VesClientUsesRpcClientRecoveryInvokeForAnyCallFallback)
     EXPECT_EQ(reply.threatLevel, 1);
     EXPECT_GE(elapsed.count(), 80);
     EXPECT_LT(elapsed.count(), 1000);
+    EXPECT_EQ(CountFilePayloadFiles(payloadDir.path()), 0);
     const auto activeSnapshot = internal::VesClientRecoveryAccess::GetRecoveryRuntimeSnapshot(*client);
     EXPECT_TRUE(activeSnapshot.lifecycleState == MemRpc::ClientLifecycleState::Active ||
                 activeSnapshot.lifecycleState == MemRpc::ClientLifecycleState::Cooldown);
 
     reopenThread.join();
     client->Shutdown();
+    if (server != nullptr) {
+        server->Stop();
+    }
     service->OnStop();
     UnloadControlService();
 }
@@ -918,8 +972,8 @@ TEST(VesPolicyTest, SecondConnectDuringActiveRequestDoesNotHangAndLeavesNewClien
         auto firstClient = VesClient::Connect();
         ASSERT_NE(firstClient, nullptr) << "iteration=" << iteration;
 
-        auto firstFuture = StartAsyncScan(*firstClient,
-                                          "/data/sleep200_second_connect_" + std::to_string(iteration) + ".bin");
+        auto firstFuture =
+            StartAsyncScan(*firstClient, "/data/sleep200_second_connect_" + std::to_string(iteration) + ".bin");
         ASSERT_TRUE(WaitFor(
             [&]() {
                 VesHeartbeatReply reply{};
@@ -972,8 +1026,8 @@ TEST(VesPolicyTest, ManualShutdownThenImmediateReconnectDoesNotHang)
         auto client = VesClient::Connect();
         ASSERT_NE(client, nullptr) << "iteration=" << iteration;
 
-        auto inflightFuture = StartAsyncScan(*client,
-                                             "/data/sleep200_shutdown_reconnect_" + std::to_string(iteration) + ".bin");
+        auto inflightFuture =
+            StartAsyncScan(*client, "/data/sleep200_shutdown_reconnect_" + std::to_string(iteration) + ".bin");
         ASSERT_TRUE(WaitFor(
             [&]() {
                 VesHeartbeatReply reply{};
@@ -996,9 +1050,9 @@ TEST(VesPolicyTest, ManualShutdownThenImmediateReconnectDoesNotHang)
         ASSERT_EQ(waitTask.wait_for(std::chrono::seconds(2)), std::future_status::ready) << "iteration=" << iteration;
         const auto [inflightStatus, inflightReply] = waitTask.get();
         (void)inflightReply;
-        EXPECT_TRUE(inflightStatus == MemRpc::StatusCode::Ok || inflightStatus == MemRpc::StatusCode::PeerDisconnected ||
-                    inflightStatus == MemRpc::StatusCode::ExecTimeout ||
-                    inflightStatus == MemRpc::StatusCode::ClientClosed)
+        EXPECT_TRUE(
+            inflightStatus == MemRpc::StatusCode::Ok || inflightStatus == MemRpc::StatusCode::PeerDisconnected ||
+            inflightStatus == MemRpc::StatusCode::ExecTimeout || inflightStatus == MemRpc::StatusCode::ClientClosed)
             << "iteration=" << iteration << " status=" << static_cast<int>(inflightStatus);
 
         shutdownThread.join();
@@ -1030,25 +1084,19 @@ TEST(VesPolicyTest, VesClientScanFileForwardsPriority)
     auto startServerForCurrentSession = [&]() {
         auto nextServer = std::make_unique<MemRpc::RpcServer>(service->serverHandles());
         nextServer->RegisterHandler(static_cast<MemRpc::Opcode>(VesOpcode::ScanFile),
-                                    [&](const MemRpc::RpcServerCall& call, MemRpc::RpcServerReply* reply) {
-                                        if (reply == nullptr) {
-                                            return;
-                                        }
-                                        ScanTask request;
-                                        if (!MemRpc::DecodeMessage<ScanTask>(call.payload, &request)) {
-                                            reply->status = MemRpc::StatusCode::ProtocolMismatch;
-                                            return;
-                                        }
-                                        ScanFileReply scanReply;
-                                        scanReply.code = 0;
-                                        scanReply.threatLevel = request.path.find("high") != std::string::npos ? 1 : 0;
-                                        if (!MemRpc::EncodeMessage<ScanFileReply>(scanReply, &reply->payload)) {
-                                            reply->status = MemRpc::StatusCode::EngineInternalError;
-                                            return;
-                                        }
-                                        invocationCount.fetch_add(1);
-                                        lastPriority.store(static_cast<int>(call.priority));
-                                    });
+                                    MakeTypedHandlerWithDecoder<ScanTask, ScanFileReply>(
+                                        [&](const MemRpc::RpcServerCall& call, ScanTask* request) {
+                                            lastPriority.store(static_cast<int>(call.priority));
+                                            return MemRpc::DecodeMessage<ScanTask>(call.payload, request);
+                                        },
+                                        [&](const ScanTask& request) {
+                                            ScanFileReply scanReply;
+                                            scanReply.code = 0;
+                                            scanReply.threatLevel =
+                                                request.path.find("high") != std::string::npos ? 1 : 0;
+                                            invocationCount.fetch_add(1);
+                                            return scanReply;
+                                        }));
         EXPECT_EQ(nextServer->Start(), MemRpc::StatusCode::Ok);
         return nextServer;
     };
