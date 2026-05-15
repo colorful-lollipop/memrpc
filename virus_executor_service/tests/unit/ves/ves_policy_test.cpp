@@ -107,25 +107,19 @@ class ScopedFilePayloadDir {
 public:
     ScopedFilePayloadDir()
     {
-        path_ = "/tmp/ves_policy_file_payload_" + std::to_string(getpid());
-        setenv("VES_FILE_PAYLOAD_DIR", path_.c_str(), 1);
         ClearVesFilePayloads();
     }
 
     ~ScopedFilePayloadDir()
     {
         ClearVesFilePayloads();
-        rmdir(path_.c_str());
-        unsetenv("VES_FILE_PAYLOAD_DIR");
     }
 
     [[nodiscard]] const std::string& path() const
     {
-        return path_;
+        static const std::string kPath = "/tmp/cache/file_payload";
+        return kPath;
     }
-
-private:
-    std::string path_;
 };
 
 int CountFilePayloadFiles(const std::string& path)
@@ -140,12 +134,7 @@ int CountFilePayloadFiles(const std::string& path)
         if (name == "." || name == "..") {
             continue;
         }
-        const std::string entryPath = path + "/" + name;
-        if (name.rfind("ves_file_payload_", 0) == 0 || name.rfind("ves_payload_", 0) == 0) {
-            ++count;
-        } else {
-            count += CountFilePayloadFiles(entryPath);
-        }
+        ++count;
     }
     closedir(stream);
     return count;

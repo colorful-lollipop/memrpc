@@ -5,13 +5,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -24,20 +24,24 @@
 namespace VirusExecutorService {
 namespace {
 
-constexpr const char* DEFAULT_FILE_PAYLOAD_DIR = "/tmp/virus_executor_service_file_payload";
-constexpr const char* FILE_PAYLOAD_DIR_ENV = "VES_FILE_PAYLOAD_DIR";
-constexpr const char* FILE_PAYLOAD_PREFIX = "ves_file_payload_";
-constexpr const char* LEGACY_FILE_PAYLOAD_PREFIX = "ves_payload_";
-constexpr const char* FILE_PAYLOAD_PROCESS_DIR_PREFIX = "pid_";
-constexpr const char* TMP_FILE_SUFFIX = ".tmp";
+constexpr const char* DEFAULT_FILE_PAYLOAD_DIR = "/tmp/cache/file_payload";
 constexpr uint32_t FILE_PAYLOAD_ENVELOPE_MAGIC = 0x56465031U;  // VFP1
 constexpr uint32_t FILE_PAYLOAD_ENVELOPE_VERSION = 1U;
-constexpr std::size_t MAX_FILE_PAYLOAD_BYTES = 64ULL * 1024ULL * 1024ULL;
+constexpr std::size_t MAX_FILE_PAYLOAD_BYTES = 128ULL * 1024ULL * 1024ULL;
 
 struct FilePayloadRef {
     std::string path;
     uint32_t size = 0;
 };
+
+std::string ParentDir(const std::string& path)
+{
+    const std::size_t slash = path.rfind('/');
+    if (slash == std::string::npos || slash == 0) {
+        return {};
+    }
+    return path.substr(0, slash);
+}
 
 bool EnsureFilePayloadDir(const std::string& dir)
 {
@@ -51,38 +55,26 @@ bool EnsureFilePayloadDir(const std::string& dir)
         struct stat st {};
         return stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
     }
+    if (errno == ENOENT) {
+        const std::string parent = ParentDir(dir);
+        if (!parent.empty() && EnsureFilePayloadDir(parent) && mkdir(dir.c_str(), 0700) == 0) {
+            return true;
+        }
+        if (errno == EEXIST) {
+            struct stat st {};
+            return stat(dir.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
+        }
+    }
     HILOGE("file payload mkdir failed path=%{public}s errno=%{public}d", dir.c_str(), errno);
     return false;
 }
 
-bool HasPrefix(const char* name, const char* prefix)
+std::string MakeFilePayloadPath(const std::string& dir)
 {
-    return std::strncmp(name, prefix, std::strlen(prefix)) == 0;
-}
-
-bool IsDirectory(const std::string& path)
-{
-    struct stat st {};
-    return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
-}
-
-std::string MakeFilePayloadPath(const std::string& dir, bool temporary)
-{
-    const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
-    std::random_device rd;
-    std::mt19937_64 rng((static_cast<uint64_t>(now) << 1U) ^ rd());
-    std::string path;
-    for (int attempt = 0; attempt < 16; ++attempt) {
-        path = dir + "/" + FILE_PAYLOAD_PREFIX + std::to_string(getpid()) + "_" + std::to_string(now) + "_" +
-               std::to_string(rng());
-        if (temporary) {
-            path += TMP_FILE_SUFFIX;
-        }
-        if (access(path.c_str(), F_OK) != 0) {
-            return path;
-        }
-    }
-    return {};
+    static std::atomic<int> counter{0};
+    const int seq = counter.fetch_add(1);
+    const auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
+    return dir + "/" + std::to_string(getpid()) + "_" + std::to_string(ts) + "_" + std::to_string(seq);
 }
 
 bool WriteAll(int fd, const uint8_t* data, std::size_t size)
@@ -141,25 +133,6 @@ bool IsPathInsideFilePayloadRoot(const std::string& dir, const std::string& path
     return path.rfind(prefix, 0) == 0 && path.find("..") == std::string::npos;
 }
 
-std::string ResolveFilePayloadRoot()
-{
-    const char* overrideDir = std::getenv(FILE_PAYLOAD_DIR_ENV);
-    if (overrideDir != nullptr && overrideDir[0] != '\0') {
-        return overrideDir;
-    }
-    return DEFAULT_FILE_PAYLOAD_DIR;
-}
-
-std::string ResolveProcessFilePayloadDir()
-{
-    return ResolveFilePayloadRoot() + "/" + FILE_PAYLOAD_PROCESS_DIR_PREFIX + std::to_string(getpid());
-}
-
-bool IsFilePayloadName(const char* name)
-{
-    return HasPrefix(name, FILE_PAYLOAD_PREFIX) || HasPrefix(name, LEGACY_FILE_PAYLOAD_PREFIX);
-}
-
 bool ClearFilePayloadsInDir(const std::string& dir)
 {
     DIR* stream = opendir(dir.c_str());
@@ -171,10 +144,15 @@ bool ClearFilePayloadsInDir(const std::string& dir)
         return false;
     }
     while (dirent* entry = readdir(stream)) {
-        if (!IsFilePayloadName(entry->d_name)) {
+        const char* name = entry->d_name;
+        if (std::strcmp(name, ".") == 0 || std::strcmp(name, "..") == 0) {
             continue;
         }
-        const std::string path = dir + "/" + entry->d_name;
+        const std::string path = dir + "/" + name;
+        struct stat st {};
+        if (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            continue;
+        }
         if (unlink(path.c_str()) != 0 && errno != ENOENT) {
             HILOGW("file payload unlink failed path=%{public}s errno=%{public}d", path.c_str(), errno);
         }
@@ -183,77 +161,40 @@ bool ClearFilePayloadsInDir(const std::string& dir)
     return true;
 }
 
-std::string ParentDir(const std::string& path)
-{
-    const std::size_t slash = path.rfind('/');
-    if (slash == std::string::npos) {
-        return {};
-    }
-    return path.substr(0, slash);
-}
-
-void RemoveProcessDirIfEmpty(const std::string& root, const std::string& path)
-{
-    const std::string parent = ParentDir(path);
-    if (parent.empty() || parent == root || !IsPathInsideFilePayloadRoot(root, parent)) {
-        return;
-    }
-    if (rmdir(parent.c_str()) != 0 && errno != ENOENT && errno != ENOTEMPTY) {
-        HILOGW("file payload rmdir failed path=%{public}s errno=%{public}d", parent.c_str(), errno);
-    }
-}
-
 bool WriteFilePayload(const std::vector<uint8_t>& payload, FilePayloadRef* ref)
 {
     if (ref == nullptr || payload.size() > std::numeric_limits<uint32_t>::max() ||
         payload.size() > MAX_FILE_PAYLOAD_BYTES) {
         return false;
     }
-    const std::string root = ResolveFilePayloadRoot();
-    if (!EnsureFilePayloadDir(root)) {
-        return false;
-    }
-    const std::string dir = ResolveProcessFilePayloadDir();
+    const std::string dir = DEFAULT_FILE_PAYLOAD_DIR;
     if (!EnsureFilePayloadDir(dir)) {
         return false;
     }
-    const std::string tmpPath = MakeFilePayloadPath(dir, true);
-    if (tmpPath.empty()) {
-        return false;
-    }
-    const std::string finalPath = tmpPath.substr(0, tmpPath.size() - std::strlen(TMP_FILE_SUFFIX));
-    const int fd = open(tmpPath.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+    const std::string path = MakeFilePayloadPath(dir);
+    const int fd = open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
     if (fd < 0) {
-        HILOGE("file payload open failed path=%{public}s errno=%{public}d", tmpPath.c_str(), errno);
+        HILOGE("file payload open failed path=%{public}s errno=%{public}d", path.c_str(), errno);
         return false;
     }
     bool ok = WriteAll(fd, payload.data(), payload.size());
-    if (ok && fsync(fd) != 0) {
-        HILOGE("file payload fsync failed path=%{public}s errno=%{public}d", tmpPath.c_str(), errno);
-        ok = false;
-    }
     if (close(fd) != 0) {
         ok = false;
     }
-    if (ok && rename(tmpPath.c_str(), finalPath.c_str()) != 0) {
-        HILOGE("file payload rename failed errno=%{public}d", errno);
-        ok = false;
-    }
     if (!ok) {
-        unlink(tmpPath.c_str());
-        unlink(finalPath.c_str());
+        unlink(path.c_str());
         return false;
     }
-    ref->path = finalPath;
+    ref->path = path;
     ref->size = static_cast<uint32_t>(payload.size());
     return true;
 }
 
 bool ReadAndRemoveFilePayload(const FilePayloadRef& ref, std::vector<uint8_t>* payload)
 {
-    const std::string root = ResolveFilePayloadRoot();
+    const std::string dir = DEFAULT_FILE_PAYLOAD_DIR;
     if (payload == nullptr || ref.path.empty() || ref.size > MAX_FILE_PAYLOAD_BYTES ||
-        !IsPathInsideFilePayloadRoot(root, ref.path)) {
+        !IsPathInsideFilePayloadRoot(dir, ref.path)) {
         return false;
     }
     const int fd = open(ref.path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -267,7 +208,6 @@ bool ReadAndRemoveFilePayload(const FilePayloadRef& ref, std::vector<uint8_t>* p
     if (unlink(ref.path.c_str()) != 0 && errno != ENOENT) {
         HILOGW("file payload consume unlink failed path=%{public}s errno=%{public}d", ref.path.c_str(), errno);
     }
-    RemoveProcessDirIfEmpty(root, ref.path);
     if (!ok || payload->size() != ref.size) {
         HILOGE("file payload size mismatch expected=%{public}u actual=%{public}zu", ref.size, payload->size());
         payload->clear();
@@ -309,20 +249,11 @@ bool DecodeFilePayloadEnvelope(MemRpc::PayloadView payload, FilePayloadRef* ref)
 
 bool ClearVesFilePayloads()
 {
-    const std::string root = ResolveFilePayloadRoot();
-    if (!EnsureFilePayloadDir(root)) {
+    const std::string dir = DEFAULT_FILE_PAYLOAD_DIR;
+    if (!EnsureFilePayloadDir(dir)) {
         return false;
     }
-
-    bool ok = ClearFilePayloadsInDir(root);
-    const std::string processDir = ResolveProcessFilePayloadDir();
-    if (IsDirectory(processDir)) {
-        ok = ClearFilePayloadsInDir(processDir) && ok;
-        if (rmdir(processDir.c_str()) != 0 && errno != ENOENT && errno != ENOTEMPTY) {
-            HILOGW("file payload rmdir failed path=%{public}s errno=%{public}d", processDir.c_str(), errno);
-        }
-    }
-    return ok;
+    return ClearFilePayloadsInDir(dir);
 }
 
 namespace detail {

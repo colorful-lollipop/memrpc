@@ -22,31 +22,20 @@ class ScopedFilePayloadDir {
 public:
     ScopedFilePayloadDir()
     {
-        path_ = "/tmp/ves_file_payload_test_" + std::to_string(getpid());
-        setenv("VES_FILE_PAYLOAD_DIR", path_.c_str(), 1);
         ClearVesFilePayloads();
     }
 
     ~ScopedFilePayloadDir()
     {
         ClearVesFilePayloads();
-        rmdir(path_.c_str());
-        unsetenv("VES_FILE_PAYLOAD_DIR");
     }
 
     [[nodiscard]] const std::string& path() const
     {
-        return path_;
+        static const std::string kPath = "/tmp/cache/file_payload";
+        return kPath;
     }
-
-private:
-    std::string path_;
 };
-
-bool IsFilePayloadName(const std::string& name)
-{
-    return name.rfind("ves_file_payload_", 0) == 0 || name.rfind("ves_payload_", 0) == 0;
-}
 
 int CountFilePayloadFiles(const std::string& path)
 {
@@ -60,13 +49,7 @@ int CountFilePayloadFiles(const std::string& path)
         if (name == "." || name == "..") {
             continue;
         }
-        std::string entryPath = path;
-        entryPath.append("/").append(name);
-        if (IsFilePayloadName(name)) {
-            ++count;
-        } else {
-            count += CountFilePayloadFiles(entryPath);
-        }
+        ++count;
     }
     closedir(stream);
     return count;
@@ -81,23 +64,19 @@ std::vector<uint8_t> EncodeScanTaskPayload(const ScanTask& task)
 
 }  // namespace
 
-TEST(VesFilePayloadTest, ClearRemovesOnlyFilePayloadFiles)
+TEST(VesFilePayloadTest, ClearRemovesAllFilesInPayloadDir)
 {
     ScopedFilePayloadDir payloadDir;
-    const std::string filePayload = payloadDir.path() + "/ves_file_payload_leftover";
-    const std::string legacyFilePayload = payloadDir.path() + "/ves_payload_leftover";
+    const std::string filePayload = payloadDir.path() + "/leftover";
     const std::string otherFile = payloadDir.path() + "/unrelated";
     {
         std::ofstream(filePayload) << "payload";
-        std::ofstream(legacyFilePayload) << "legacy";
         std::ofstream(otherFile) << "other";
     }
 
     ASSERT_TRUE(ClearVesFilePayloads());
     EXPECT_NE(access(filePayload.c_str(), F_OK), 0);
-    EXPECT_NE(access(legacyFilePayload.c_str(), F_OK), 0);
-    EXPECT_EQ(access(otherFile.c_str(), F_OK), 0);
-    unlink(otherFile.c_str());
+    EXPECT_NE(access(otherFile.c_str(), F_OK), 0);
 }
 
 TEST(VesFilePayloadTest, ClearCreatesFilePayloadDirectory)
