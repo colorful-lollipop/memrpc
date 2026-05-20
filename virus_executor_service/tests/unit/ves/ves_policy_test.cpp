@@ -21,6 +21,7 @@
 #include "iservice_registry.h"
 #include "memrpc/client/rpc_client.h"
 #include "memrpc/core/codec.h"
+#include "memrpc/core/file_payload.h"
 #include "memrpc/server/rpc_server.h"
 #include "memrpc/test_support/dev_bootstrap.h"
 #include "service/rpc_handler_registrar.h"
@@ -28,7 +29,6 @@
 #include "system_ability.h"
 #include "transport/ves_control_stub.h"
 #include "ves/ves_codec.h"
-#include "ves/ves_file_payload.h"
 #include "ves/ves_handler_registration.h"
 #include "ves/ves_protocol.h"
 #include "ves/ves_types.h"
@@ -107,17 +107,17 @@ class ScopedFilePayloadDir {
 public:
     ScopedFilePayloadDir()
     {
-        ClearVesFilePayloads();
+        MemRpc::ClearFilePayloads();
     }
 
     ~ScopedFilePayloadDir()
     {
-        ClearVesFilePayloads();
+        MemRpc::ClearFilePayloads();
     }
 
     [[nodiscard]] const std::string& path() const
     {
-        static const std::string kPath = "/tmp/cache/file_payload";
+        static const std::string kPath = MemRpc::DEFAULT_FILE_PAYLOAD_DIR;
         return kPath;
     }
 };

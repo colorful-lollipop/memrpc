@@ -3,8 +3,8 @@
 
 #include <utility>
 
+#include "memrpc/core/codec.h"
 #include "service/rpc_handler_registrar.h"
-#include "ves/ves_file_payload.h"
 
 namespace VirusExecutorService {
 
@@ -12,7 +12,9 @@ template <typename Request, typename Reply, typename Handler>
 inline MemRpc::RpcHandler MakeVesTypedHandler(Handler handler)
 {
     return MakeTypedHandlerWithDecoder<Request, Reply>(
-        [](const MemRpc::RpcServerCall& call, Request* request) { return DecodeVesRequestPayload(call, request); },
+        [](const MemRpc::RpcServerCall& call, Request* request) {
+            return MemRpc::DecodeMessage<Request>(call.payload, request);
+        },
         std::move(handler));
 }
 

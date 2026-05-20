@@ -32,6 +32,7 @@ if (NOT TARGET memrpc_core)
       ${MEMRPC_MODULE_ROOT}/src/bootstrap/shared_memory_session_host.cpp
       ${MEMRPC_MODULE_ROOT}/src/core/byte_reader.cpp
       ${MEMRPC_MODULE_ROOT}/src/core/byte_writer.cpp
+      ${MEMRPC_MODULE_ROOT}/src/core/file_payload.cpp
       ${MEMRPC_MODULE_ROOT}/src/core/log.cpp
       ${MEMRPC_MODULE_ROOT}/src/core/session.cpp
   )
@@ -98,7 +99,6 @@ target_link_libraries(virus_executor_service_transport PUBLIC memrpc_core ohos_s
 target_compile_features(virus_executor_service_transport PUBLIC cxx_std_17)
 
 add_library(virus_executor_service_ves
-    src/ves/ves_file_payload.cpp
     src/ves/ves_sample_rules.cpp
 )
 target_include_directories(virus_executor_service_ves PUBLIC
@@ -116,7 +116,6 @@ target_include_directories(virus_executor_service_client_lib PUBLIC
 target_link_libraries(virus_executor_service_client_lib PUBLIC
     memrpc_core
     virus_executor_service_transport
-    virus_executor_service_ves
 )
 target_compile_features(virus_executor_service_client_lib PUBLIC cxx_std_17)
 
@@ -235,15 +234,6 @@ if (VIRUS_EXECUTOR_SERVICE_ENABLE_TESTS)
   )
   add_test(NAME virus_executor_service_codec_test
       COMMAND virus_executor_service_codec_test)
-
-  add_executable(virus_executor_service_file_payload_test
-      tests/unit/ves/ves_file_payload_test.cpp)
-  target_link_libraries(virus_executor_service_file_payload_test PRIVATE
-      virus_executor_service_lib
-      GTest::gtest_main
-  )
-  add_test(NAME virus_executor_service_file_payload_test
-      COMMAND virus_executor_service_file_payload_test)
 
   add_executable(virus_executor_service_testkit_headers_test
       tests/unit/testkit/testkit_headers_test.cpp)

@@ -9,7 +9,6 @@
 #include "iservice_registry.h"
 #include "transport/ves_control_interface.h"
 #include "ves/ves_codec.h"
-#include "ves/ves_file_payload.h"
 #include "ves/ves_protocol.h"
 #include "virus_protection_executor_log.h"
 
@@ -133,14 +132,12 @@ struct VesInvokeExecutionContext {
 struct VesInvokeRequestView {
     MemRpc::Opcode opcode = MemRpc::OPCODE_INVALID;
     MemRpc::Priority priority = MemRpc::Priority::Normal;
-    MemRpc::RequestFlags flags = MemRpc::REQUEST_FLAG_NONE;
     uint32_t execTimeoutMs = 0;
     const std::vector<uint8_t>* payload = nullptr;
 };
 
 struct VesPreparedInvoke {
     std::vector<uint8_t> payload;
-    MemRpc::RequestFlags flags = MemRpc::REQUEST_FLAG_NONE;
 };
 
 template <typename Reply>
@@ -155,7 +152,6 @@ MemRpc::StatusCode InvokeMemRpcApi(const VesInvokeExecutionContext& context,
     MemRpc::RpcCall call;
     call.opcode = request.opcode;
     call.priority = request.priority;
-    call.flags = request.flags;
     call.execTimeoutMs = request.execTimeoutMs;
     call.payload = *request.payload;
     return MemRpc::WaitAndDecode<Reply>(context.client->InvokeAsync(std::move(call)), reply);
@@ -178,20 +174,8 @@ MemRpc::StatusCode PrepareInvokePayload(MemRpc::Opcode opcode, const Request& re
         return MemRpc::StatusCode::InvalidArgument;
     }
     prepared->payload.clear();
-    prepared->flags = MemRpc::REQUEST_FLAG_NONE;
 
-    MemRpc::StatusCode status = EncodeInvokePayload(opcode, request, &prepared->payload);
-    if (status != MemRpc::StatusCode::Ok) {
-        return status;
-    }
-
-    status = PrepareVesFilePayloadForMemRpc(&prepared->payload, &prepared->flags);
-    if (status != MemRpc::StatusCode::Ok) {
-        HILOGE("VesClient::InvokeApi prepare payload failed opcode=%{public}u status=%{public}d",
-               opcode,
-               static_cast<int>(status));
-    }
-    return status;
+    return EncodeInvokePayload(opcode, request, &prepared->payload);
 }
 
 }  // namespace
@@ -308,7 +292,6 @@ MemRpc::StatusCode VesClient::InvokeApi(MemRpc::Opcode opcode,
     const VesInvokeRequestView invokeRequest{
         opcode,
         priority,
-        prepared.flags,
         execTimeoutMs,
         &prepared.payload,
     };

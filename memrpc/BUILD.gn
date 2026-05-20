@@ -33,6 +33,7 @@ source_set("memrpc_core") {
     "src/client/rpc_client.cpp",
     "src/core/byte_reader.cpp",
     "src/core/byte_writer.cpp",
+    "src/core/file_payload.cpp",
     "src/core/log.cpp",
     "src/core/session.cpp",
     "src/server/rpc_server.cpp",
@@ -80,6 +81,7 @@ group("tests") {
       ":memrpc_build_config_test",
       ":memrpc_byte_codec_test",
       ":memrpc_engine_death_handler_test",
+      ":memrpc_file_payload_test",
       ":memrpc_framework_split_headers_test",
       ":memrpc_log_test",
       ":memrpc_protocol_layout_test",
@@ -136,6 +138,12 @@ if (memrpc_enable_tests) {
 
   repo_gtest("memrpc_framework_split_headers_test") {
     sources = [ "tests/framework_split_headers_test.cpp" ]
+    deps = [ ":memrpc" ]
+    configs = [ ":memrpc_test_config" ]
+  }
+
+  repo_gtest("memrpc_file_payload_test") {
+    sources = [ "tests/file_payload_test.cpp" ]
     deps = [ ":memrpc" ]
     configs = [ ":memrpc_test_config" ]
   }

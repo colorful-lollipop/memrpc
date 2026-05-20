@@ -137,23 +137,25 @@
 **RequestRingEntry (8192 bytes)**:
 ```cpp
 struct RequestRingEntry {
-    // HEADER_BYTES = 24 bytes
+    // HEADER_BYTES = 22 bytes
     uint64_t requestId;        // 请求唯一ID
     uint32_t execTimeoutMs;    // 执行超时时间
     uint16_t opcode;           // 操作码 (如 ScanFile=102)
     uint8_t  priority;         // 优先级 (0=Normal, 1=High)
-    uint8_t  flags;            // 应用自定义请求标志
+    uint8_t  payloadKind;      // 0=inline payload, 1=file payload ref
     uint32_t payloadSize;      // 有效载荷大小
+    uint8_t  reserved0;
+    uint8_t  reserved1;
     
-    // INLINE_PAYLOAD_BYTES = 8192 - 24 = 8168 bytes
-    std::array<uint8_t, 8168> payload;  // 内联数据区
+    // INLINE_PAYLOAD_BYTES = 8192 - 22 = 8170 bytes
+    std::array<uint8_t, 8170> payload;  // 内联数据区
 };
 ```
 
 **ResponseRingEntry (8192 bytes)**:
 ```cpp
 struct ResponseRingEntry {
-    // HEADER_BYTES = 36 bytes
+    // HEADER_BYTES = 32 bytes
     uint64_t requestId;        // 对应请求的ID
     uint32_t statusCode;       // 状态码 (StatusCode)
     uint32_t eventDomain;      // 事件域 (Event类型时使用)
@@ -161,11 +163,11 @@ struct ResponseRingEntry {
     uint32_t flags;            // 标志位
     uint32_t resultSize;       // 结果数据大小
     ResponseMessageKind messageKind;  // Reply(0) / Event(1)
-    uint16_t reserved;
-    uint32_t reserved0;
+    uint8_t  payloadKind;      // 0=inline payload, 1=file payload ref
+    uint8_t  reserved;
     
-    // INLINE_PAYLOAD_BYTES = 8192 - 36 = 8156 bytes
-    std::array<uint8_t, 8156> payload;  // 响应/事件数据
+    // INLINE_PAYLOAD_BYTES = 8192 - 32 = 8160 bytes
+    std::array<uint8_t, 8160> payload;  // 响应/事件数据
 };
 ```
 
@@ -708,14 +710,11 @@ MemRpc::StatusCode VesClient::InvokeApi(MemRpc::Opcode opcode,
     std::vector<uint8_t> payload;
     EncodeInvokePayload(opcode, request, &payload);
     
-    // 2.2 准备 memrpc payload：小请求原样走共享内存；
-    //     超限请求先写入 VES file payload，共享内存只传 file payload envelope。
-    MemRpc::RequestFlags requestFlags = MemRpc::REQUEST_FLAG_NONE;
-    PrepareVesFilePayloadForMemRpc(&payload, &requestFlags);
+    // 2.2 memrpc 自动选择 inline payload 或 file payload envelope。
     
     // 2.3 执行 memrpc 调用，自动处理恢复
     return client_.RetryUntilRecoverySettles([&]() {
-        return InvokeMemRpcApi(context, opcode, priority, requestFlags, execTimeoutMs, payload, reply);
+        return InvokeMemRpcApi(context, opcode, priority, execTimeoutMs, payload, reply);
     });
 }
 ```

@@ -4,6 +4,7 @@ add_library(memrpc_core
   bootstrap/shared_memory_session_host.cpp
   core/byte_reader.cpp
   core/byte_writer.cpp
+  core/file_payload.cpp
   core/log.cpp
   core/session.cpp
 )

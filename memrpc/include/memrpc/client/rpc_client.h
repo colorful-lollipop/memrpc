@@ -16,7 +16,6 @@ namespace MemRpc {
 struct RpcCall {
     Opcode opcode = OPCODE_INVALID;
     Priority priority = Priority::Normal;
-    RequestFlags flags = REQUEST_FLAG_NONE;
     // exec_timeout_ms 从 client 侧请求成功发布到 request ring 后开始计时，
     // 直到收到最终 reply 为止。超时后返回 ExecTimeout，但不会取消服务端执行；
     // 如果真实 reply 晚到，client 会直接忽略。

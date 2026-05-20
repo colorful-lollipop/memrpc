@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "core/session.h"
+#include "memrpc/core/file_payload.h"
 #include "memrpc/core/runtime_utils.h"
 #include "virus_protection_executor_log.h"
 
@@ -185,12 +186,6 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             pending_[requestId] = std::move(pending);
-        }
-
-        void Erase(uint64_t requestId)
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            pending_.erase(requestId);
         }
 
         std::optional<PendingRequest> Take(uint64_t requestId)
@@ -1125,6 +1120,18 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
             *activePollSessionId = 0;
         }
 
+        static bool ResolveFilePayload(const ResponseRingEntry& entry, std::vector<uint8_t>* payload)
+        {
+            if (payload == nullptr) {
+                return false;
+            }
+            return ResolveFilePayloadFromTransport(DEFAULT_FILE_PAYLOAD_DIR,
+                                                   entry.payload.data(),
+                                                   entry.resultSize,
+                                                   entry.payloadKind,
+                                                   payload);
+        }
+
         void SyncActivePollSession(UniqueFd* activePollFd,
                                    uint64_t* activePollSessionId,
                                    const std::function<void()>& resetActivePollFd)
@@ -1186,11 +1193,30 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
             if (!pending.has_value()) {
                 HILOGW("RpcClient::ResolveCompletedRequest ignored late reply request_id=%{public}llu",
                        static_cast<unsigned long long>(entry.requestId));
+                if (entry.payloadKind == PAYLOAD_KIND_FILE_REF) {
+                    std::vector<uint8_t> discardedPayload;
+                    (void)ResolveFilePayload(entry, &discardedPayload);
+                }
                 return;
             }
             RpcReply reply;
             reply.status = static_cast<StatusCode>(entry.statusCode);
-            reply.payload.assign(entry.payload.begin(), entry.payload.begin() + entry.resultSize);
+            if (entry.payloadKind == PAYLOAD_KIND_FILE_REF) {
+                if (!ResolveFilePayload(entry, &reply.payload)) {
+                    HILOGE("RpcClient::ResolveCompletedRequest failed to resolve file payload request_id=%{public}llu",
+                           static_cast<unsigned long long>(entry.requestId));
+                    reply.status = StatusCode::PeerDisconnected;
+                    reply.payload.clear();
+                }
+            } else if (entry.payloadKind == PAYLOAD_KIND_INLINE) {
+                reply.payload.assign(entry.payload.begin(), entry.payload.begin() + entry.resultSize);
+            } else {
+                HILOGE("RpcClient::ResolveCompletedRequest unknown payload kind request_id=%{public}llu "
+                       "payload_kind=%{public}u",
+                       static_cast<unsigned long long>(entry.requestId),
+                       entry.payloadKind);
+                reply.status = StatusCode::ProtocolMismatch;
+            }
             if (reply.status != StatusCode::Ok) {
                 owner_->ApplyFailureRecoveryDecision(pending->info, reply.status);
             }
@@ -2009,7 +2035,7 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
         return recoveryState_.WaitOneRecoveryRetryTick(deadline, workersRunning_, clientControlState_);
     }
 
-    StatusCode ValidatePushSession(const PendingSubmit& submit, Session& session) const
+    StatusCode ValidatePushSession(const PendingSubmit& submit, const Session& session) const
     {
         if (!session.Valid() || session.Header() == nullptr) {
             HILOGE("RpcClient::TryPushRequest failed: session not valid request_id=%{public}llu opcode=%{public}u",
@@ -2017,29 +2043,54 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
                    submit.call.opcode);
             return StatusCode::PeerDisconnected;
         }
-        if (submit.call.payload.size() > session.MaxRequestBytes() ||
-            submit.call.payload.size() > RequestRingEntry::INLINE_PAYLOAD_BYTES) {
-            HILOGE("RpcClient::TryPushRequest failed: payload too large size=%{public}zu max=%{public}u "
-                   "inline_max=%{public}u",
+        return StatusCode::Ok;
+    }
+
+    static StatusCode PrepareRequestPayloadForTransport(const PendingSubmit& submit,
+                                                        const Session& session,
+                                                        std::vector<uint8_t>* transportPayload,
+                                                        uint8_t* payloadKind)
+    {
+        if (transportPayload == nullptr || payloadKind == nullptr) {
+            return StatusCode::InvalidArgument;
+        }
+        const std::size_t maxTransportBytes =
+            std::min<std::size_t>(session.MaxRequestBytes(), RequestRingEntry::INLINE_PAYLOAD_BYTES);
+        if (!PrepareFilePayloadForTransport(
+                DEFAULT_FILE_PAYLOAD_DIR, submit.call.payload, maxTransportBytes, transportPayload, payloadKind)) {
+            HILOGE("RpcClient::TryPushRequest failed to prepare payload request_id=%{public}llu "
+                   "opcode=%{public}u size=%{public}zu max=%{public}zu",
+                   static_cast<unsigned long long>(submit.requestId),
+                   submit.call.opcode,
                    submit.call.payload.size(),
-                   session.MaxRequestBytes(),
-                   RequestRingEntry::INLINE_PAYLOAD_BYTES);
+                   maxTransportBytes);
             return StatusCode::PayloadTooLarge;
+        }
+        if (*payloadKind == PAYLOAD_KIND_FILE_REF) {
+            HILOGW("RpcClient::TryPushRequest oversized request uses file payload: request_id=%{public}llu "
+                   "opcode=%{public}u payload_size=%{public}zu envelope_size=%{public}zu max=%{public}zu",
+                   static_cast<unsigned long long>(submit.requestId),
+                   submit.call.opcode,
+                   submit.call.payload.size(),
+                   transportPayload->size(),
+                   maxTransportBytes);
         }
         return StatusCode::Ok;
     }
 
-    static RequestRingEntry BuildRequestEntry(const PendingSubmit& submit)
+    static RequestRingEntry BuildRequestEntry(const PendingSubmit& submit,
+                                              const std::vector<uint8_t>& transportPayload,
+                                              uint8_t payloadKind)
     {
         RequestRingEntry entry;
         entry.requestId = submit.requestId;
         entry.execTimeoutMs = submit.call.execTimeoutMs;
         entry.opcode = submit.call.opcode;
         entry.priority = static_cast<uint8_t>(submit.call.priority);
-        entry.flags = submit.call.flags;
-        entry.payloadSize = static_cast<uint32_t>(submit.call.payload.size());
-        if (!submit.call.payload.empty()) {
-            std::memcpy(entry.payload.data(), submit.call.payload.data(), submit.call.payload.size());
+        entry.payloadSize = static_cast<uint32_t>(transportPayload.size());
+        entry.payloadKind = payloadKind;
+        if (!transportPayload.empty()) {
+            std::memcpy(entry.payload.data(), transportPayload.data(), transportPayload.size());
         }
         return entry;
     }
@@ -2053,13 +2104,23 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
         return pending;
     }
 
-    StatusCode PushRequestToSession(Session& session, const PendingSubmit& submit, const RequestRingEntry& entry)
+    StatusCode PushRequestToSession(Session& session,
+                                    const PendingSubmit& submit,
+                                    const RequestRingEntry& entry,
+                                    const std::vector<uint8_t>& transportPayload,
+                                    uint8_t payloadKind)
     {
         const bool highPriority = IsHighPriority(submit.call);
         const StatusCode status =
             session.PushRequest(highPriority ? QueueKind::HighRequest : QueueKind::NormalRequest, entry);
         if (status != StatusCode::Ok) {
-            requestStore_.Erase(submit.requestId);
+            (void)requestStore_.Take(submit.requestId);
+            if (payloadKind == PAYLOAD_KIND_FILE_REF) {
+                (void)RemoveFilePayloadFromTransport(DEFAULT_FILE_PAYLOAD_DIR,
+                                                     transportPayload.data(),
+                                                     transportPayload.size(),
+                                                     payloadKind);
+            }
             if (status != StatusCode::QueueFull) {
                 HILOGE("RpcClient::TryPushRequest failed: status=%{public}d request_id=%{public}llu opcode=%{public}u",
                        static_cast<int>(status),
@@ -2090,9 +2151,17 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
                 return validationStatus;
             }
 
-            const RequestRingEntry entry = BuildRequestEntry(submit);
+            std::vector<uint8_t> transportPayload;
+            uint8_t payloadKind = PAYLOAD_KIND_INLINE;
+            const StatusCode prepareStatus =
+                PrepareRequestPayloadForTransport(submit, session, &transportPayload, &payloadKind);
+            if (prepareStatus != StatusCode::Ok) {
+                return prepareStatus;
+            }
+
+            const RequestRingEntry entry = BuildRequestEntry(submit, transportPayload, payloadKind);
             requestStore_.Put(submit.requestId, BuildPendingRequest(submit));
-            return PushRequestToSession(session, submit, entry);
+            return PushRequestToSession(session, submit, entry, transportPayload, payloadKind);
         });
     }
 

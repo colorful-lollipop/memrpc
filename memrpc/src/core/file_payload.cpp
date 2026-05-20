@@ -1,4 +1,4 @@
-#include "ves/ves_file_payload.h"
+#include "memrpc/core/file_payload.h"
 
 #include <dirent.h>
 #include <fcntl.h>
@@ -8,8 +8,6 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -18,21 +16,10 @@
 #include "memrpc/core/byte_reader.h"
 #include "memrpc/core/byte_writer.h"
 #include "memrpc/core/codec.h"
-#include "memrpc/core/protocol.h"
 #include "virus_protection_executor_log.h"
 
-namespace VirusExecutorService {
+namespace MemRpc {
 namespace {
-
-constexpr const char* DEFAULT_FILE_PAYLOAD_DIR = "/tmp/cache/file_payload";
-constexpr uint32_t FILE_PAYLOAD_ENVELOPE_MAGIC = 0x56465031U;  // VFP1
-constexpr uint32_t FILE_PAYLOAD_ENVELOPE_VERSION = 1U;
-constexpr std::size_t MAX_FILE_PAYLOAD_BYTES = 128ULL * 1024ULL * 1024ULL;
-
-struct FilePayloadRef {
-    std::string path;
-    uint32_t size = 0;
-};
 
 std::string ParentDir(const std::string& path)
 {
@@ -133,8 +120,30 @@ bool IsPathInsideFilePayloadRoot(const std::string& dir, const std::string& path
     return path.rfind(prefix, 0) == 0 && path.find("..") == std::string::npos;
 }
 
-bool ClearFilePayloadsInDir(const std::string& dir)
+bool UnlinkFilePayload(const std::string& dir, const FilePayloadRef& ref, bool logWarning)
 {
+    if (ref.path.empty() || ref.size > MAX_FILE_PAYLOAD_BYTES || !IsPathInsideFilePayloadRoot(dir, ref.path)) {
+        return false;
+    }
+    if (unlink(ref.path.c_str()) != 0 && errno != ENOENT) {
+        if (logWarning) {
+            HILOGW("file payload unlink failed path=%{public}s errno=%{public}d", ref.path.c_str(), errno);
+        } else {
+            HILOGE("file payload unlink failed path=%{public}s errno=%{public}d", ref.path.c_str(), errno);
+        }
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+bool ClearFilePayloads(const std::string& dir)
+{
+    if (!EnsureFilePayloadDir(dir)) {
+        return false;
+    }
+
     DIR* stream = opendir(dir.c_str());
     if (stream == nullptr) {
         if (errno == ENOENT) {
@@ -143,6 +152,7 @@ bool ClearFilePayloadsInDir(const std::string& dir)
         HILOGE("file payload opendir failed path=%{public}s errno=%{public}d", dir.c_str(), errno);
         return false;
     }
+
     while (dirent* entry = readdir(stream)) {
         const char* name = entry->d_name;
         if (std::strcmp(name, ".") == 0 || std::strcmp(name, "..") == 0) {
@@ -161,22 +171,28 @@ bool ClearFilePayloadsInDir(const std::string& dir)
     return true;
 }
 
-bool WriteFilePayload(const std::vector<uint8_t>& payload, FilePayloadRef* ref)
+bool RemoveFilePayload(const std::string& dir, const FilePayloadRef& ref)
+{
+    return UnlinkFilePayload(dir, ref, false);
+}
+
+bool WriteFilePayload(const std::string& dir, const std::vector<uint8_t>& payload, FilePayloadRef* ref)
 {
     if (ref == nullptr || payload.size() > std::numeric_limits<uint32_t>::max() ||
         payload.size() > MAX_FILE_PAYLOAD_BYTES) {
         return false;
     }
-    const std::string dir = DEFAULT_FILE_PAYLOAD_DIR;
     if (!EnsureFilePayloadDir(dir)) {
         return false;
     }
+
     const std::string path = MakeFilePayloadPath(dir);
     const int fd = open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
     if (fd < 0) {
         HILOGE("file payload open failed path=%{public}s errno=%{public}d", path.c_str(), errno);
         return false;
     }
+
     bool ok = WriteAll(fd, payload.data(), payload.size());
     if (close(fd) != 0) {
         ok = false;
@@ -185,28 +201,30 @@ bool WriteFilePayload(const std::vector<uint8_t>& payload, FilePayloadRef* ref)
         unlink(path.c_str());
         return false;
     }
+
     ref->path = path;
     ref->size = static_cast<uint32_t>(payload.size());
     return true;
 }
 
-bool ReadAndRemoveFilePayload(const FilePayloadRef& ref, std::vector<uint8_t>* payload)
+bool ReadAndRemoveFilePayload(const std::string& dir, const FilePayloadRef& ref, std::vector<uint8_t>* payload)
 {
-    const std::string dir = DEFAULT_FILE_PAYLOAD_DIR;
     if (payload == nullptr || ref.path.empty() || ref.size > MAX_FILE_PAYLOAD_BYTES ||
         !IsPathInsideFilePayloadRoot(dir, ref.path)) {
         return false;
     }
+
     const int fd = open(ref.path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         HILOGE("file payload open for read failed path=%{public}s errno=%{public}d", ref.path.c_str(), errno);
-        unlink(ref.path.c_str());
+        (void)RemoveFilePayload(dir, ref);
         return false;
     }
+
     const bool ok = ReadAll(fd, payload);
     close(fd);
-    if (unlink(ref.path.c_str()) != 0 && errno != ENOENT) {
-        HILOGW("file payload consume unlink failed path=%{public}s errno=%{public}d", ref.path.c_str(), errno);
+    if (!RemoveFilePayload(dir, ref)) {
+        HILOGW("file payload consume unlink failed path=%{public}s", ref.path.c_str());
     }
     if (!ok || payload->size() != ref.size) {
         HILOGE("file payload size mismatch expected=%{public}u actual=%{public}zu", ref.size, payload->size());
@@ -218,80 +236,112 @@ bool ReadAndRemoveFilePayload(const FilePayloadRef& ref, std::vector<uint8_t>* p
 
 bool EncodeFilePayloadEnvelope(const FilePayloadRef& ref, std::vector<uint8_t>* payload)
 {
-    MemRpc::ByteWriter writer;
+    if (payload == nullptr) {
+        return false;
+    }
+    ByteWriter writer;
     return writer.WriteUint32(FILE_PAYLOAD_ENVELOPE_MAGIC) && writer.WriteUint32(FILE_PAYLOAD_ENVELOPE_VERSION) &&
-           writer.WriteUint32(ref.size) && writer.WriteString(ref.path) && MemRpc::detail::AssignBytes(writer, payload);
+           writer.WriteUint32(ref.size) && writer.WriteString(ref.path) && detail::AssignBytes(writer, payload);
 }
 
-bool DecodeFilePayloadEnvelope(MemRpc::PayloadView payload, FilePayloadRef* ref)
+bool DecodeFilePayloadEnvelope(const uint8_t* bytes, std::size_t size, FilePayloadRef* ref)
 {
     if (ref == nullptr) {
         return false;
     }
-    MemRpc::ByteReader reader(payload.data(), payload.size());
+    ByteReader reader(bytes, size);
     uint32_t magic = 0;
     uint32_t version = 0;
-    uint32_t size = 0;
+    uint32_t payloadSize = 0;
     std::string path;
     if (!reader.ReadUint32(&magic) || magic != FILE_PAYLOAD_ENVELOPE_MAGIC) {
         return false;
     }
-    if (!reader.ReadUint32(&version) || version != FILE_PAYLOAD_ENVELOPE_VERSION || !reader.ReadUint32(&size) ||
+    if (!reader.ReadUint32(&version) || version != FILE_PAYLOAD_ENVELOPE_VERSION || !reader.ReadUint32(&payloadSize) ||
         !reader.ReadString(&path) || path.empty()) {
         return false;
     }
     ref->path = std::move(path);
-    ref->size = size;
+    ref->size = payloadSize;
     return true;
 }
 
-}  // namespace
-
-bool ClearVesFilePayloads()
+bool PrepareFilePayloadForTransport(const std::string& dir,
+                                    const std::vector<uint8_t>& payload,
+                                    std::size_t maxTransportBytes,
+                                    std::vector<uint8_t>* transportPayload,
+                                    uint8_t* payloadKind)
 {
-    const std::string dir = DEFAULT_FILE_PAYLOAD_DIR;
-    if (!EnsureFilePayloadDir(dir)) {
+    if (transportPayload == nullptr || payloadKind == nullptr) {
         return false;
     }
-    return ClearFilePayloadsInDir(dir);
-}
 
-namespace detail {
+    transportPayload->clear();
+    *payloadKind = PAYLOAD_KIND_INLINE;
 
-bool ReadVesFilePayloadForDecode(MemRpc::PayloadView payload, std::vector<uint8_t>* resolvedPayload)
-{
-    if (resolvedPayload == nullptr) {
-        return false;
-    }
-    FilePayloadRef ref;
-    return DecodeFilePayloadEnvelope(payload, &ref) && ReadAndRemoveFilePayload(ref, resolvedPayload);
-}
-
-}  // namespace detail
-
-MemRpc::StatusCode PrepareVesFilePayloadForMemRpc(std::vector<uint8_t>* payload, MemRpc::RequestFlags* flags)
-{
-    if (payload == nullptr || flags == nullptr) {
-        return MemRpc::StatusCode::InvalidArgument;
-    }
-    *flags &= static_cast<MemRpc::RequestFlags>(~VES_REQUEST_FLAG_FILE_PAYLOAD_REF);
-    if (payload->size() <= MemRpc::DEFAULT_MAX_REQUEST_BYTES) {
-        return MemRpc::StatusCode::Ok;
+    if (payload.size() <= maxTransportBytes) {
+        *transportPayload = payload;
+        return true;
     }
 
-    HILOGW("oversized VES request uses file payload: size=%{public}zu/%{public}zu",
-           payload->size(),
-           MemRpc::DEFAULT_MAX_REQUEST_BYTES);
     FilePayloadRef fileRef;
-    std::vector<uint8_t> fileEnvelope;
-    if (!WriteFilePayload(*payload, &fileRef) || !EncodeFilePayloadEnvelope(fileRef, &fileEnvelope) ||
-        fileEnvelope.size() > MemRpc::DEFAULT_MAX_REQUEST_BYTES) {
-        HILOGE("failed to prepare VES file payload size=%{public}zu", payload->size());
-        return MemRpc::StatusCode::PayloadTooLarge;
+    std::vector<uint8_t> envelope;
+    if (!WriteFilePayload(dir, payload, &fileRef) || !EncodeFilePayloadEnvelope(fileRef, &envelope)) {
+        (void)RemoveFilePayload(dir, fileRef);
+        return false;
     }
-    *payload = std::move(fileEnvelope);
-    *flags |= VES_REQUEST_FLAG_FILE_PAYLOAD_REF;
-    return MemRpc::StatusCode::Ok;
+    if (envelope.size() > maxTransportBytes) {
+        (void)RemoveFilePayload(dir, fileRef);
+        return false;
+    }
+
+    *transportPayload = std::move(envelope);
+    *payloadKind = PAYLOAD_KIND_FILE_REF;
+    return true;
 }
 
-}  // namespace VirusExecutorService
+bool RemoveFilePayloadFromTransport(const std::string& dir,
+                                    const uint8_t* bytes,
+                                    std::size_t size,
+                                    uint8_t payloadKind)
+{
+    if (payloadKind == PAYLOAD_KIND_INLINE) {
+        return true;
+    }
+    if (payloadKind != PAYLOAD_KIND_FILE_REF) {
+        return false;
+    }
+
+    FilePayloadRef fileRef;
+    return DecodeFilePayloadEnvelope(bytes, size, &fileRef) && RemoveFilePayload(dir, fileRef);
+}
+
+bool ResolveFilePayloadFromTransport(const std::string& dir,
+                                     const uint8_t* bytes,
+                                     std::size_t size,
+                                     uint8_t payloadKind,
+                                     std::vector<uint8_t>* payload)
+{
+    if (payload == nullptr) {
+        return false;
+    }
+    payload->clear();
+    if (payloadKind == PAYLOAD_KIND_INLINE) {
+        if (size == 0U) {
+            return true;
+        }
+        if (bytes == nullptr && size != 0U) {
+            return false;
+        }
+        payload->assign(bytes, bytes + size);
+        return true;
+    }
+    if (payloadKind != PAYLOAD_KIND_FILE_REF) {
+        return false;
+    }
+
+    FilePayloadRef fileRef;
+    return DecodeFilePayloadEnvelope(bytes, size, &fileRef) && ReadAndRemoveFilePayload(dir, fileRef, payload);
+}
+
+}  // namespace MemRpc

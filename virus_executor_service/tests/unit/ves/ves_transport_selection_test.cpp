@@ -12,7 +12,6 @@
 #include "service/rpc_handler_registrar.h"
 #include "transport/ves_control_stub.h"
 #include "ves/ves_codec.h"
-#include "ves/ves_file_payload.h"
 #include "ves/ves_protocol.h"
 
 namespace VirusExecutorService {
@@ -42,7 +41,7 @@ void CloseHandles(MemRpc::BootstrapHandles& handles)
 
 void RegisterScanHandler(MemRpc::RpcServer* server,
                          std::atomic<int>* memrpcCount,
-                         std::atomic<MemRpc::RequestFlags>* lastFlags)
+                         std::atomic<std::size_t>* lastPayloadSize)
 {
     if (server == nullptr) {
         return;
@@ -50,11 +49,11 @@ void RegisterScanHandler(MemRpc::RpcServer* server,
 
     server->RegisterHandler(static_cast<MemRpc::Opcode>(VesOpcode::ScanFile),
                             MakeTypedHandlerWithDecoder<ScanTask, ScanFileReply>(
-                                [lastFlags](const MemRpc::RpcServerCall& call, ScanTask* request) {
-                                    if (lastFlags != nullptr) {
-                                        lastFlags->store(call.flags);
+                                [lastPayloadSize](const MemRpc::RpcServerCall& call, ScanTask* request) {
+                                    if (lastPayloadSize != nullptr) {
+                                        lastPayloadSize->store(call.payload.size());
                                     }
-                                    return DecodeVesRequestPayload(call, request);
+                                    return MemRpc::DecodeMessage<ScanTask>(call.payload, request);
                                 },
                                 [memrpcCount](const ScanTask& request) {
                                     ScanFileReply scanReply;
@@ -77,7 +76,7 @@ public:
         CloseHandles(warmup);
 
         server_ = std::make_unique<MemRpc::RpcServer>(bootstrap_->serverHandles());
-        RegisterScanHandler(server_.get(), &memrpcCount_, &lastFlags_);
+        RegisterScanHandler(server_.get(), &memrpcCount_, &lastPayloadSize_);
         EXPECT_EQ(server_->Start(), MemRpc::StatusCode::Ok);
     }
 
@@ -148,9 +147,9 @@ public:
         return anyCallCount_.load();
     }
 
-    [[nodiscard]] MemRpc::RequestFlags lastFlags() const
+    [[nodiscard]] std::size_t lastPayloadSize() const
     {
-        return lastFlags_.load();
+        return lastPayloadSize_.load();
     }
 
 private:
@@ -159,7 +158,7 @@ private:
     std::atomic<bool> sessionOpen_{false};
     std::atomic<int> memrpcCount_{0};
     std::atomic<int> anyCallCount_{0};
-    std::atomic<MemRpc::RequestFlags> lastFlags_{MemRpc::REQUEST_FLAG_NONE};
+    std::atomic<std::size_t> lastPayloadSize_{0};
 };
 
 class VesClientHarness {
@@ -192,7 +191,7 @@ TEST(VesTransportSelectionTest, SmallScanFileUsesMemrpcPath)
     EXPECT_EQ(reply.threatLevel, 1);
     EXPECT_EQ(harness.control->memrpcCount(), 1);
     EXPECT_EQ(harness.control->anyCallCount(), 0);
-    EXPECT_EQ(harness.control->lastFlags(), MemRpc::REQUEST_FLAG_NONE);
+    EXPECT_GT(harness.control->lastPayloadSize(), 0U);
 }
 
 TEST(VesTransportSelectionTest, OversizedScanFileUsesFilePayloadMemrpcPath)
@@ -205,7 +204,7 @@ TEST(VesTransportSelectionTest, OversizedScanFileUsesFilePayloadMemrpcPath)
     EXPECT_EQ(reply.threatLevel, 1);
     EXPECT_EQ(harness.control->memrpcCount(), 1);
     EXPECT_EQ(harness.control->anyCallCount(), 0);
-    EXPECT_NE(harness.control->lastFlags() & VES_REQUEST_FLAG_FILE_PAYLOAD_REF, 0u);
+    EXPECT_GT(harness.control->lastPayloadSize(), MemRpc::DEFAULT_MAX_REQUEST_BYTES);
 }
 
 }  // namespace VirusExecutorService

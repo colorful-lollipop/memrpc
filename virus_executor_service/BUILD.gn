@@ -29,10 +29,7 @@ source_set("virus_executor_service_transport") {
 }
 
 source_set("virus_executor_service_ves") {
-  sources = [
-    "src/ves/ves_file_payload.cpp",
-    "src/ves/ves_sample_rules.cpp",
-  ]
+  sources = [ "src/ves/ves_sample_rules.cpp" ]
   public_configs = [ ":ves_public_config" ]
   public_deps = [ "//memrpc:memrpc_core" ]
 }
@@ -130,7 +127,6 @@ group("tests") {
   if (memrpc_enable_tests) {
     deps += [
       ":virus_executor_service_codec_test",
-      ":virus_executor_service_file_payload_test",
       ":virus_executor_service_heartbeat_test",
       ":virus_executor_service_recovery_reason_test",
       ":virus_executor_service_session_service_test",
@@ -217,11 +213,6 @@ if (memrpc_enable_tests) {
 
   repo_gtest("virus_executor_service_codec_test") {
     sources = [ "tests/unit/ves/ves_codec_test.cpp" ]
-    deps = [ ":virus_executor_service_lib" ]
-  }
-
-  repo_gtest("virus_executor_service_file_payload_test") {
-    sources = [ "tests/unit/ves/ves_file_payload_test.cpp" ]
     deps = [ ":virus_executor_service_lib" ]
   }
 

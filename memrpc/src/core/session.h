@@ -2,6 +2,7 @@
 #define MEMRPC_CORE_SESSION_H_
 
 #include <cstdint>
+#include <string>
 
 #include "core/shm_layout.h"
 #include "memrpc/core/bootstrap.h"
@@ -58,6 +59,7 @@ public:
     bool PopRequest(QueueKind queue, RequestRingEntry* entry);
     StatusCode PushResponse(const ResponseRingEntry& entry);
     bool PopResponse(ResponseRingEntry* entry);
+    void RemovePendingFilePayloads(const std::string& dir);
 
 private:
     // 根据 queue 类型解析出实际 ring 的 cursor/mutex/entries 指针。

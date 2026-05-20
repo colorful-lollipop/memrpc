@@ -92,21 +92,23 @@ flowchart TB
             <h2>Ring Entry 结构</h2>
             <h3>RequestRingEntry (8192 bytes)</h3>
             <pre data-language="cpp">struct RequestRingEntry {
-    // Header: 24 bytes
+    // Header: 22 bytes
     uint64_t requestId;        // 请求唯一ID
     uint32_t execTimeoutMs;    // 执行超时时间
     uint16_t opcode;           // 操作码 (ScanFile=102)
     uint8_t  priority;         // 优先级 (0=Normal, 1=High)
-    uint8_t  reserved0;
+    uint8_t  payloadKind;      // 0=inline payload, 1=file payload ref
     uint32_t payloadSize;      // 有效载荷大小
+    uint8_t  reserved0;
+    uint8_t  reserved1;
     
-    // Payload: 8168 bytes
-    std::array&lt;uint8_t, 8168&gt; payload;
+    // Payload: 8170 bytes
+    std::array&lt;uint8_t, 8170&gt; payload;
 };</pre>
 
             <h3>ResponseRingEntry (8192 bytes)</h3>
             <pre data-language="cpp">struct ResponseRingEntry {
-    // Header: 36 bytes
+    // Header: 32 bytes
     uint64_t requestId;        // 对应请求ID
     uint32_t statusCode;       // 状态码
     uint32_t eventDomain;      // 事件域
@@ -114,9 +116,11 @@ flowchart TB
     uint32_t flags;
     uint32_t resultSize;
     ResponseMessageKind messageKind;  // Reply(0) / Event(1)
+    uint8_t payloadKind;       // 0=inline payload, 1=file payload ref
+    uint8_t reserved;
     
-    // Payload: 8156 bytes
-    std::array&lt;uint8_t, 8156&gt; payload;
+    // Payload: 8160 bytes
+    std::array&lt;uint8_t, 8160&gt; payload;
 };</pre>
 
             <h2>BootstrapHandles (引导句柄)</h2>

@@ -5,10 +5,13 @@
 #include <unistd.h>
 #include <csignal>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <ctime>
+#include <type_traits>
 
+#include "memrpc/core/file_payload.h"
 #include "virus_protection_executor_log.h"
 
 namespace MemRpc {
@@ -183,6 +186,32 @@ bool PopRingEntry(Session::RingAccess access, EntryType* entry)
     *entry = entries[head % access.cursor->capacity];
     access.cursor->head.store(head + 1U, std::memory_order_release);
     return true;
+}
+
+template <typename EntryType>
+void RemovePendingFilePayloadsFromRing(Session::RingAccess access, const std::string& dir)
+{
+    if (access.cursor == nullptr || access.entries == nullptr || access.cursor->capacity == 0) {
+        return;
+    }
+    const uint32_t head = access.cursor->head.load(std::memory_order_acquire);
+    const uint32_t tail = access.cursor->tail.load(std::memory_order_acquire);
+    const uint32_t count = std::min(tail - head, access.cursor->capacity);
+    auto* entries = static_cast<EntryType*>(access.entries);
+    for (uint32_t i = 0; i < count; ++i) {
+        const EntryType& entry = entries[(head + i) % access.cursor->capacity];
+        if constexpr (std::is_same_v<EntryType, RequestRingEntry>) {
+            (void)RemoveFilePayloadFromTransport(dir,
+                                                 entry.payload.data(),
+                                                 entry.payloadSize,
+                                                 entry.payloadKind);
+        } else {
+            (void)RemoveFilePayloadFromTransport(dir,
+                                                 entry.payload.data(),
+                                                 entry.resultSize,
+                                                 entry.payloadKind);
+        }
+    }
 }
 
 }  // namespace
@@ -451,7 +480,12 @@ StatusCode Session::PushRequest(QueueKind queue, const RequestRingEntry& entry)
                static_cast<uint32_t>(State()));
         return StatusCode::PeerDisconnected;
     }
-    return PushRingEntry<RequestRingEntry>(ResolveRing(queue), entry);
+    const StatusCode status = PushRingEntry<RequestRingEntry>(ResolveRing(queue), entry);
+    if (status == StatusCode::Ok && State() != SessionState::Alive) {
+        HILOGW("Session::PushRequest observed broken session after push");
+        return StatusCode::PeerDisconnected;
+    }
+    return status;
 }
 
 bool Session::PopRequest(QueueKind queue, RequestRingEntry* entry)
@@ -470,7 +504,12 @@ StatusCode Session::PushResponse(const ResponseRingEntry& entry)
                static_cast<uint32_t>(State()));
         return StatusCode::PeerDisconnected;
     }
-    return PushRingEntry<ResponseRingEntry>(ResolveRing(QueueKind::Response), entry);
+    const StatusCode status = PushRingEntry<ResponseRingEntry>(ResolveRing(QueueKind::Response), entry);
+    if (status == StatusCode::Ok && State() != SessionState::Alive) {
+        HILOGW("Session::PushResponse observed broken session after push");
+        return StatusCode::PeerDisconnected;
+    }
+    return status;
 }
 
 bool Session::PopResponse(ResponseRingEntry* entry)
@@ -480,6 +519,16 @@ bool Session::PopResponse(ResponseRingEntry* entry)
         return false;
     }
     return PopRingEntry<ResponseRingEntry>(ResolveRing(QueueKind::Response), entry);
+}
+
+void Session::RemovePendingFilePayloads(const std::string& dir)
+{
+    if (header_ == nullptr || mappedRegion_ == nullptr) {
+        return;
+    }
+    RemovePendingFilePayloadsFromRing<RequestRingEntry>(ResolveRing(QueueKind::HighRequest), dir);
+    RemovePendingFilePayloadsFromRing<RequestRingEntry>(ResolveRing(QueueKind::NormalRequest), dir);
+    RemovePendingFilePayloadsFromRing<ResponseRingEntry>(ResolveRing(QueueKind::Response), dir);
 }
 
 Session::RingAccess Session::ResolveRing(QueueKind queue)

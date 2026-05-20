@@ -7,8 +7,8 @@
 
 #include "iservice_registry.h"
 #include "memrpc/core/codec.h"
+#include "memrpc/core/file_payload.h"
 #include "ves/ves_codec.h"
-#include "ves/ves_file_payload.h"
 #include "ves/ves_protocol.h"
 #include "virus_protection_executor_log.h"
 
@@ -185,7 +185,7 @@ void VirusExecutorService::OnStart()
 {
     HILOGI("OnStart sa_id=%{public}d", GetSystemAbilityId());
     stopping_.store(false);
-    ClearVesFilePayloads();
+    (void)MemRpc::ClearFilePayloads();
     testkitService_.SetFaultInjectionEnabled(IsTestkitFaultInjectionEnabled());
     {
         std::lock_guard<std::mutex> lock(lifecycleMutex_);
@@ -212,7 +212,6 @@ void VirusExecutorService::OnStop()
     }
     service_.SetEventPublisher({});
     service_.ResetEngines();
-    ClearVesFilePayloads();
     OHOS::SystemAbility::OnStop();
 }
 

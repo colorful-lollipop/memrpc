@@ -9,18 +9,13 @@ namespace MemRpc {
 
 // 共享内存头和 ring 布局版本号；双方必须严格一致。
 inline constexpr uint32_t SHARED_MEMORY_MAGIC = 0x4d454d52U;
-inline constexpr uint32_t PROTOCOL_VERSION = 8U;
+inline constexpr uint32_t PROTOCOL_VERSION = 9U;
 inline constexpr uint32_t RING_ENTRY_BYTES = 8192U;
 
 // Framework-level opcode type. Applications define their own typed enums and
 // cast to Opcode when building RpcCall / registering handlers.
 using Opcode = uint16_t;
 inline constexpr Opcode OPCODE_INVALID = 0;
-// Request flags are transported by memrpc but interpreted by applications.
-using RequestFlags = uint8_t;
-inline constexpr RequestFlags REQUEST_FLAG_NONE = 0U;
-inline constexpr RequestFlags REQUEST_FLAG_APPLICATION_0 = 1U << 0U;
-
 enum class ResponseMessageKind : uint16_t {  // NOLINT(performance-enum-size)
     Reply = 0,
     Event = 1,
@@ -37,10 +32,12 @@ struct RequestRingEntry {
     uint32_t execTimeoutMs = 0;
     uint16_t opcode = OPCODE_INVALID;
     uint8_t priority = 0;
-    RequestFlags flags = REQUEST_FLAG_NONE;
+    uint8_t payloadKind = 0;  // 0 = inline payload, 1 = file payload ref
     uint32_t payloadSize = 0;
+    uint8_t reserved0 = 0;
+    uint8_t reserved1 = 0;
     static constexpr std::size_t HEADER_BYTES =
-        SumFieldBytes<uint64_t, uint32_t, Opcode, uint8_t, RequestFlags, uint32_t>();
+        SumFieldBytes<uint64_t, uint32_t, Opcode, uint8_t, uint8_t, uint32_t, uint8_t, uint8_t>();
     static constexpr std::size_t INLINE_PAYLOAD_BYTES = RING_ENTRY_BYTES - HEADER_BYTES;
     std::array<uint8_t, INLINE_PAYLOAD_BYTES> payload{};
 };
@@ -53,8 +50,8 @@ struct ResponseRingEntry {
     uint32_t flags = 0;
     uint32_t resultSize = 0;
     ResponseMessageKind messageKind = ResponseMessageKind::Reply;
-    uint16_t reserved = 0;
-    uint32_t reserved0 = 0;
+    uint8_t payloadKind = 0;  // 0 = inline payload, 1 = file payload ref
+    uint8_t reserved = 0;
     static constexpr std::size_t HEADER_BYTES = SumFieldBytes<uint64_t,
                                                               uint32_t,
                                                               uint32_t,
@@ -62,8 +59,8 @@ struct ResponseRingEntry {
                                                               uint32_t,
                                                               uint32_t,
                                                               ResponseMessageKind,
-                                                              uint16_t,
-                                                              uint32_t>();
+                                                              uint8_t,
+                                                              uint8_t>();
     static constexpr std::size_t INLINE_PAYLOAD_BYTES = RING_ENTRY_BYTES - HEADER_BYTES;
     std::array<uint8_t, INLINE_PAYLOAD_BYTES> payload{};
 };
