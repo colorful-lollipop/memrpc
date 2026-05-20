@@ -11,6 +11,10 @@ TEST(ProtocolLayoutTest, ConstantsAndEntrySizesAreStable)
     EXPECT_EQ(MemRpc::SHARED_MEMORY_MAGIC, 0x4d454d52U);
     EXPECT_EQ(MemRpc::PROTOCOL_VERSION, 9U);
     EXPECT_EQ(MemRpc::RING_ENTRY_BYTES, 8192U);
+    EXPECT_EQ(MemRpc::RequestRingEntry::HEADER_BYTES, 20U);
+    EXPECT_EQ(MemRpc::RequestRingEntry::INLINE_PAYLOAD_BYTES, 8172U);
+    EXPECT_EQ(MemRpc::ResponseRingEntry::HEADER_BYTES, 31U);
+    EXPECT_EQ(MemRpc::ResponseRingEntry::INLINE_PAYLOAD_BYTES, 8161U);
     EXPECT_EQ(MemRpc::DEFAULT_MAX_REQUEST_BYTES, static_cast<uint32_t>(MemRpc::RequestRingEntry::INLINE_PAYLOAD_BYTES));
     EXPECT_EQ(MemRpc::DEFAULT_MAX_RESPONSE_BYTES,
               static_cast<uint32_t>(MemRpc::ResponseRingEntry::INLINE_PAYLOAD_BYTES));

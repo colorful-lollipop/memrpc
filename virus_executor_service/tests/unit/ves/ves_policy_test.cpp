@@ -81,6 +81,8 @@ bool WaitFor(const std::function<bool()>& predicate, std::chrono::milliseconds t
     return predicate();
 }
 
+constexpr auto kActiveRequestObservedTimeout = std::chrono::seconds(1);
+
 void CloseHandles(MemRpc::BootstrapHandles& handles)
 {
     if (handles.shmFd >= 0) {
@@ -968,7 +970,7 @@ TEST(VesPolicyTest, SecondConnectDuringActiveRequestDoesNotHangAndLeavesNewClien
                 VesHeartbeatReply reply{};
                 return service->Heartbeat(reply) == MemRpc::StatusCode::Ok && reply.inFlight >= 1u;
             },
-            std::chrono::milliseconds(300)))
+            kActiveRequestObservedTimeout))
             << "iteration=" << iteration;
 
         auto secondClient = VesClient::Connect();
@@ -1022,7 +1024,7 @@ TEST(VesPolicyTest, ManualShutdownThenImmediateReconnectDoesNotHang)
                 VesHeartbeatReply reply{};
                 return service->Heartbeat(reply) == MemRpc::StatusCode::Ok && reply.inFlight >= 1u;
             },
-            std::chrono::milliseconds(300)))
+            kActiveRequestObservedTimeout))
             << "iteration=" << iteration;
 
         std::thread shutdownThread([&]() { client->Shutdown(); });

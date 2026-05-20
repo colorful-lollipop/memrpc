@@ -34,10 +34,8 @@ struct RequestRingEntry {
     uint8_t priority = 0;
     uint8_t payloadKind = 0;  // 0 = inline payload, 1 = file payload ref
     uint32_t payloadSize = 0;
-    uint8_t reserved0 = 0;
-    uint8_t reserved1 = 0;
     static constexpr std::size_t HEADER_BYTES =
-        SumFieldBytes<uint64_t, uint32_t, Opcode, uint8_t, uint8_t, uint32_t, uint8_t, uint8_t>();
+        SumFieldBytes<uint64_t, uint32_t, Opcode, uint8_t, uint8_t, uint32_t>();
     static constexpr std::size_t INLINE_PAYLOAD_BYTES = RING_ENTRY_BYTES - HEADER_BYTES;
     std::array<uint8_t, INLINE_PAYLOAD_BYTES> payload{};
 };
@@ -51,7 +49,6 @@ struct ResponseRingEntry {
     uint32_t resultSize = 0;
     ResponseMessageKind messageKind = ResponseMessageKind::Reply;
     uint8_t payloadKind = 0;  // 0 = inline payload, 1 = file payload ref
-    uint8_t reserved = 0;
     static constexpr std::size_t HEADER_BYTES = SumFieldBytes<uint64_t,
                                                               uint32_t,
                                                               uint32_t,
@@ -59,7 +56,6 @@ struct ResponseRingEntry {
                                                               uint32_t,
                                                               uint32_t,
                                                               ResponseMessageKind,
-                                                              uint8_t,
                                                               uint8_t>();
     static constexpr std::size_t INLINE_PAYLOAD_BYTES = RING_ENTRY_BYTES - HEADER_BYTES;
     std::array<uint8_t, INLINE_PAYLOAD_BYTES> payload{};

@@ -1120,16 +1120,40 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
             *activePollSessionId = 0;
         }
 
-        static bool ResolveFilePayload(const ResponseRingEntry& entry, std::vector<uint8_t>* payload)
+        static StatusCode ResolveEntryPayload(const ResponseRingEntry& entry, std::vector<uint8_t>* payload)
         {
             if (payload == nullptr) {
-                return false;
+                return StatusCode::InvalidArgument;
             }
-            return ResolveFilePayloadFromTransport(DEFAULT_FILE_PAYLOAD_DIR,
-                                                   entry.payload.data(),
-                                                   entry.resultSize,
-                                                   entry.payloadKind,
-                                                   payload);
+            payload->clear();
+            if (entry.resultSize > ResponseRingEntry::INLINE_PAYLOAD_BYTES) {
+                return StatusCode::ProtocolMismatch;
+            }
+            if (entry.payloadKind == PAYLOAD_KIND_INLINE) {
+                payload->assign(entry.payload.begin(), entry.payload.begin() + entry.resultSize);
+                return StatusCode::Ok;
+            }
+            if (entry.payloadKind == PAYLOAD_KIND_FILE_REF) {
+                return ResolveFilePayloadFromTransport(DEFAULT_FILE_PAYLOAD_DIR,
+                                                       entry.payload.data(),
+                                                       entry.resultSize,
+                                                       entry.payloadKind,
+                                                       payload)
+                         ? StatusCode::Ok
+                         : StatusCode::PeerDisconnected;
+            }
+            return StatusCode::ProtocolMismatch;
+        }
+
+        static void DiscardEntryPayloadIfPresent(const ResponseRingEntry& entry)
+        {
+            if (entry.payloadKind != PAYLOAD_KIND_FILE_REF) {
+                return;
+            }
+            (void)RemoveFilePayloadFromTransport(DEFAULT_FILE_PAYLOAD_DIR,
+                                                 entry.payload.data(),
+                                                 entry.resultSize,
+                                                 entry.payloadKind);
         }
 
         void SyncActivePollSession(UniqueFd* activePollFd,
@@ -1193,29 +1217,20 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
             if (!pending.has_value()) {
                 HILOGW("RpcClient::ResolveCompletedRequest ignored late reply request_id=%{public}llu",
                        static_cast<unsigned long long>(entry.requestId));
-                if (entry.payloadKind == PAYLOAD_KIND_FILE_REF) {
-                    std::vector<uint8_t> discardedPayload;
-                    (void)ResolveFilePayload(entry, &discardedPayload);
-                }
+                DiscardEntryPayloadIfPresent(entry);
                 return;
             }
             RpcReply reply;
             reply.status = static_cast<StatusCode>(entry.statusCode);
-            if (entry.payloadKind == PAYLOAD_KIND_FILE_REF) {
-                if (!ResolveFilePayload(entry, &reply.payload)) {
-                    HILOGE("RpcClient::ResolveCompletedRequest failed to resolve file payload request_id=%{public}llu",
-                           static_cast<unsigned long long>(entry.requestId));
-                    reply.status = StatusCode::PeerDisconnected;
-                    reply.payload.clear();
-                }
-            } else if (entry.payloadKind == PAYLOAD_KIND_INLINE) {
-                reply.payload.assign(entry.payload.begin(), entry.payload.begin() + entry.resultSize);
-            } else {
-                HILOGE("RpcClient::ResolveCompletedRequest unknown payload kind request_id=%{public}llu "
-                       "payload_kind=%{public}u",
+            const StatusCode payloadStatus = ResolveEntryPayload(entry, &reply.payload);
+            if (payloadStatus != StatusCode::Ok) {
+                HILOGE("RpcClient::ResolveCompletedRequest failed to resolve payload request_id=%{public}llu "
+                       "payload_kind=%{public}u payload_status=%{public}d",
                        static_cast<unsigned long long>(entry.requestId),
-                       entry.payloadKind);
-                reply.status = StatusCode::ProtocolMismatch;
+                       entry.payloadKind,
+                       static_cast<int>(payloadStatus));
+                reply.status = payloadStatus;
+                reply.payload.clear();
             }
             if (reply.status != StatusCode::Ok) {
                 owner_->ApplyFailureRecoveryDecision(pending->info, reply.status);
@@ -1232,13 +1247,25 @@ struct RpcClient::Impl : public std::enable_shared_from_this<RpcClient::Impl> {
                 callback = owner_->eventCallback_;
             }
             if (!callback) {
+                DiscardEntryPayloadIfPresent(entry);
                 return;
             }
             RpcEvent event;
             event.eventDomain = entry.eventDomain;
             event.eventType = entry.eventType;
             event.flags = entry.flags;
-            event.payload.assign(entry.payload.begin(), entry.payload.begin() + entry.resultSize);
+            const StatusCode payloadStatus = ResolveEntryPayload(entry, &event.payload);
+            if (payloadStatus != StatusCode::Ok) {
+                HILOGE("RpcClient::DeliverEvent failed to resolve payload event_domain=%{public}u "
+                       "event_type=%{public}u payload_kind=%{public}u status=%{public}d",
+                       entry.eventDomain,
+                       entry.eventType,
+                       entry.payloadKind,
+                       static_cast<int>(payloadStatus));
+                const uint64_t observedSessionId = owner_->CurrentSessionId();
+                owner_->HandleEngineDeath(observedSessionId, observedSessionId);
+                return;
+            }
             callback(event);
             owner_->TouchActivity();
         }

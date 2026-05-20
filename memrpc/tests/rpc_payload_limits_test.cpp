@@ -3,10 +3,12 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <atomic>
+#include <condition_variable>
 #include <chrono>
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -410,8 +412,9 @@ TEST(RpcPayloadLimitsTest, ConcurrentOversizedRoundTripsDoNotLosePayloadsAndClea
     server.Stop();
 }
 
-TEST(RpcPayloadLimitsTest, PublishEventRejectsOversizedPayload)
+TEST(RpcPayloadLimitsTest, OversizedEventUsesFilePayloadAndReturnsPayload)
 {
+    ScopedFilePayloadDir payloadDir;
     auto bootstrap = std::make_shared<DevBootstrapChannel>();
     BootstrapHandles handles = MakeDefaultBootstrapHandles();
     ASSERT_EQ(bootstrap->OpenSession(handles), StatusCode::Ok);
@@ -422,13 +425,66 @@ TEST(RpcPayloadLimitsTest, PublishEventRejectsOversizedPayload)
                            [](const RpcServerCall&, RpcServerReply* reply) { reply->status = StatusCode::Ok; });
     ASSERT_EQ(server.Start(), StatusCode::Ok);
 
+    RpcClient client(bootstrap);
+    ASSERT_EQ(client.Init(), StatusCode::Ok);
+
+    std::mutex eventMutex;
+    std::condition_variable eventCv;
+    bool eventReady = false;
+    RpcEvent receivedEvent;
+    client.SetEventCallback([&](const RpcEvent& event) {
+        std::lock_guard<std::mutex> lock(eventMutex);
+        receivedEvent = event;
+        eventReady = true;
+        eventCv.notify_one();
+    });
+
     RpcEvent event;
     event.eventDomain = 7;
     event.eventType = 11;
-    event.payload.resize(DEFAULT_MAX_RESPONSE_BYTES + 1U, 0x33);
+    event.flags = 0x55U;
+    event.payload = MakePatternPayload(DEFAULT_MAX_RESPONSE_BYTES + 1U, 0x33U);
 
-    EXPECT_EQ(server.PublishEvent(event), StatusCode::PayloadTooLarge);
+    ASSERT_EQ(server.PublishEvent(event), StatusCode::Ok);
 
+    std::unique_lock<std::mutex> lock(eventMutex);
+    ASSERT_TRUE(eventCv.wait_for(lock, std::chrono::seconds{2}, [&eventReady] { return eventReady; }));
+    EXPECT_EQ(receivedEvent.eventDomain, event.eventDomain);
+    EXPECT_EQ(receivedEvent.eventType, event.eventType);
+    EXPECT_EQ(receivedEvent.flags, event.flags);
+    EXPECT_EQ(receivedEvent.payload, event.payload);
+    EXPECT_EQ(CountFilePayloadFiles(payloadDir.path()), 0);
+
+    client.Shutdown();
+    server.Stop();
+}
+
+TEST(RpcPayloadLimitsTest, OversizedEventWithoutCallbackStillCleansFilePayload)
+{
+    ScopedFilePayloadDir payloadDir;
+    auto bootstrap = std::make_shared<DevBootstrapChannel>();
+    BootstrapHandles handles = MakeDefaultBootstrapHandles();
+    ASSERT_EQ(bootstrap->OpenSession(handles), StatusCode::Ok);
+    CloseHandles(handles);
+
+    RpcServer server(bootstrap->serverHandles());
+    server.RegisterHandler(kPayloadLimitOpcode,
+                           [](const RpcServerCall&, RpcServerReply* reply) { reply->status = StatusCode::Ok; });
+    ASSERT_EQ(server.Start(), StatusCode::Ok);
+
+    RpcClient client(bootstrap);
+    ASSERT_EQ(client.Init(), StatusCode::Ok);
+
+    RpcEvent event;
+    event.eventDomain = 17;
+    event.eventType = 19;
+    event.payload = MakePatternPayload(DEFAULT_MAX_RESPONSE_BYTES + 128U, 0x41U);
+
+    ASSERT_EQ(server.PublishEvent(event), StatusCode::Ok);
+    EXPECT_TRUE(WaitForCondition([&payloadDir] { return CountFilePayloadFiles(payloadDir.path()) == 0; },
+                                 std::chrono::seconds{2}));
+
+    client.Shutdown();
     server.Stop();
 }
 

@@ -137,25 +137,23 @@
 **RequestRingEntry (8192 bytes)**:
 ```cpp
 struct RequestRingEntry {
-    // HEADER_BYTES = 22 bytes
+    // HEADER_BYTES = 20 bytes
     uint64_t requestId;        // 请求唯一ID
     uint32_t execTimeoutMs;    // 执行超时时间
     uint16_t opcode;           // 操作码 (如 ScanFile=102)
     uint8_t  priority;         // 优先级 (0=Normal, 1=High)
     uint8_t  payloadKind;      // 0=inline payload, 1=file payload ref
     uint32_t payloadSize;      // 有效载荷大小
-    uint8_t  reserved0;
-    uint8_t  reserved1;
     
-    // INLINE_PAYLOAD_BYTES = 8192 - 22 = 8170 bytes
-    std::array<uint8_t, 8170> payload;  // 内联数据区
+    // INLINE_PAYLOAD_BYTES = 8192 - 20 = 8172 bytes
+    std::array<uint8_t, 8172> payload;  // 内联数据区
 };
 ```
 
 **ResponseRingEntry (8192 bytes)**:
 ```cpp
 struct ResponseRingEntry {
-    // HEADER_BYTES = 32 bytes
+    // HEADER_BYTES = 31 bytes
     uint64_t requestId;        // 对应请求的ID
     uint32_t statusCode;       // 状态码 (StatusCode)
     uint32_t eventDomain;      // 事件域 (Event类型时使用)
@@ -164,10 +162,9 @@ struct ResponseRingEntry {
     uint32_t resultSize;       // 结果数据大小
     ResponseMessageKind messageKind;  // Reply(0) / Event(1)
     uint8_t  payloadKind;      // 0=inline payload, 1=file payload ref
-    uint8_t  reserved;
     
-    // INLINE_PAYLOAD_BYTES = 8192 - 32 = 8160 bytes
-    std::array<uint8_t, 8160> payload;  // 响应/事件数据
+    // INLINE_PAYLOAD_BYTES = 8192 - 31 = 8161 bytes
+    std::array<uint8_t, 8161> payload;  // 响应/事件数据
 };
 ```
 

@@ -456,40 +456,36 @@ struct RpcServer::Impl : public std::enable_shared_from_this<RpcServer::Impl> {
         return reply;
     }
 
-    StatusCode PrepareResponsePayloadForTransport(uint64_t requestId, RpcReply* reply, uint8_t* payloadKind) const
+    StatusCode PrepareResponsePayloadForTransport(std::vector<uint8_t>* payload, uint8_t* payloadKind) const
     {
-        if (!session.Valid() || session.Header() == nullptr || reply == nullptr || payloadKind == nullptr) {
-            HILOGE("RpcServer::WriteResponse failed: invalid session request_id=%{public}llu",
-                   static_cast<unsigned long long>(requestId));
+        if (payload == nullptr || payloadKind == nullptr) {
+            return StatusCode::InvalidArgument;
+        }
+        if (!session.Valid() || session.Header() == nullptr) {
+            HILOGE("RpcServer::PrepareResponsePayloadForTransport failed: invalid session");
             return StatusCode::PeerDisconnected;
         }
 
-        *payloadKind = PAYLOAD_KIND_INLINE;
-
-        std::vector<uint8_t> transportPayload;
         const std::size_t maxTransportBytes =
             std::min<std::size_t>(session.MaxResponseBytes(), ResponseRingEntry::INLINE_PAYLOAD_BYTES);
+        const std::size_t originalSize = payload->size();
+        std::vector<uint8_t> entryPayload;
         if (!PrepareFilePayloadForTransport(
-                DEFAULT_FILE_PAYLOAD_DIR, reply->payload, maxTransportBytes, &transportPayload, payloadKind)) {
-            HILOGE("RpcServer::WriteResponse failed to prepare payload request_id=%{public}llu "
-                   "payload_size=%{public}zu max=%{public}zu",
-                   static_cast<unsigned long long>(requestId),
-                   reply->payload.size(),
+                DEFAULT_FILE_PAYLOAD_DIR, *payload, maxTransportBytes, &entryPayload, payloadKind)) {
+            HILOGE("RpcServer::PrepareResponsePayloadForTransport failed: payload_size=%{public}zu max=%{public}zu",
+                   originalSize,
                    maxTransportBytes);
-            reply->status = StatusCode::PayloadTooLarge;
-            reply->payload.clear();
-            return StatusCode::Ok;
+            return StatusCode::PayloadTooLarge;
         }
 
         if (*payloadKind == PAYLOAD_KIND_FILE_REF) {
-            HILOGW("RpcServer::WriteResponse oversized response uses file payload: request_id=%{public}llu "
+            HILOGW("RpcServer::PrepareResponsePayloadForTransport oversized payload uses file payload: "
                    "payload_size=%{public}zu envelope_size=%{public}zu max=%{public}zu",
-                   static_cast<unsigned long long>(requestId),
-                   reply->payload.size(),
-                   transportPayload.size(),
+                   originalSize,
+                   entryPayload.size(),
                    maxTransportBytes);
         }
-        reply->payload = std::move(transportPayload);
+        *payload = std::move(entryPayload);
         return StatusCode::Ok;
     }
 
@@ -536,8 +532,12 @@ struct RpcServer::Impl : public std::enable_shared_from_this<RpcServer::Impl> {
     StatusCode WriteResponse(const RequestRingEntry& requestEntry, RpcReply reply)
     {
         uint8_t payloadKind = PAYLOAD_KIND_INLINE;
-        const StatusCode prepareStatus = PrepareResponsePayloadForTransport(requestEntry.requestId, &reply, &payloadKind);
-        if (prepareStatus != StatusCode::Ok) {
+        const StatusCode prepareStatus = PrepareResponsePayloadForTransport(&reply.payload, &payloadKind);
+        if (prepareStatus == StatusCode::PayloadTooLarge) {
+            reply.status = StatusCode::PayloadTooLarge;
+            reply.payload.clear();
+            payloadKind = PAYLOAD_KIND_INLINE;
+        } else if (prepareStatus != StatusCode::Ok) {
             return prepareStatus;
         }
 
@@ -564,15 +564,11 @@ struct RpcServer::Impl : public std::enable_shared_from_this<RpcServer::Impl> {
             HILOGE("PublishEvent failed, session is not ready");
             return StatusCode::EngineInternalError;
         }
-        if (event.payload.size() > session.MaxResponseBytes() ||
-            event.payload.size() > ResponseRingEntry::INLINE_PAYLOAD_BYTES) {
-            HILOGE(
-                "RpcServer::PublishEvent failed: payload too large size=%{public}zu max=%{public}u "
-                "inline_max=%{public}u",
-                event.payload.size(),
-                session.MaxResponseBytes(),
-                ResponseRingEntry::INLINE_PAYLOAD_BYTES);
-            return StatusCode::PayloadTooLarge;
+        std::vector<uint8_t> payload = event.payload;
+        uint8_t payloadKind = PAYLOAD_KIND_INLINE;
+        const StatusCode prepareStatus = PrepareResponsePayloadForTransport(&payload, &payloadKind);
+        if (prepareStatus != StatusCode::Ok) {
+            return prepareStatus;
         }
 
         ResponseRingEntry entry;
@@ -580,9 +576,10 @@ struct RpcServer::Impl : public std::enable_shared_from_this<RpcServer::Impl> {
         entry.eventDomain = event.eventDomain;
         entry.eventType = event.eventType;
         entry.flags = event.flags;
-        entry.resultSize = static_cast<uint32_t>(event.payload.size());
-        if (!event.payload.empty()) {
-            std::memcpy(entry.payload.data(), event.payload.data(), event.payload.size());
+        entry.payloadKind = payloadKind;
+        entry.resultSize = static_cast<uint32_t>(payload.size());
+        if (!payload.empty()) {
+            std::memcpy(entry.payload.data(), payload.data(), payload.size());
         }
 
         auto completion = std::make_shared<CompletionState>();
@@ -592,6 +589,7 @@ struct RpcServer::Impl : public std::enable_shared_from_this<RpcServer::Impl> {
         item.completion = completion;
         if (!EnqueueCompletion(std::move(item))) {
             HILOGE("RpcServer::PublishEvent failed to enqueue completion");
+            RemoveResponseFilePayloadIfPresent(entry);
             return StatusCode::QueueFull;
         }
 
